@@ -28,6 +28,11 @@ Recommended PR convention for phase branches:
 - `.github/workflows/plan-sync.yml`
   - Source of truth sync from plan file -> issues + project items
   - Also manages a parent `plan-orchestrator` issue linking all milestone issues
+  - Writes machine-readable dependency metadata to milestone issues:
+    - `<!-- dependencies: Mx,My -->`
+  - Dependency source:
+    - preferred: optional `## Dependencies` table in plan
+    - fallback: sequential chain (`M1` depends on `M0`, etc.)
   - Triggers:
     - `push` to plan/workflow file
     - `issues` lifecycle events
@@ -73,6 +78,21 @@ Recommended PR convention for phase branches:
   - Baseline CI for implementation branches and PRs
   - Runs on `main`, `plan-base`, and working branches (`phase/*`, `chore/*`)
   - Executes `lint`, `typecheck`, `test`, `build` scripts when present
+
+- `.github/workflows/kickoff-phase-work.yml`
+  - Starts execution from the orchestrator issue
+  - Triggers:
+    - assign/reopen/label events on orchestrator issue (`plan-orchestrator`)
+    - manual dispatch (`workflow_dispatch`)
+  - Behavior:
+    - reads open milestone issues and their dependency metadata
+    - selects dependency-ready milestones only
+    - respects parallel cap (`max_parallel`, default 2)
+    - creates `phase/Mx-*` branches from `plan-base`
+    - opens draft PRs into `plan-base`
+  - Notes:
+    - assignment to orchestrator can trigger kickoff
+    - board status changes alone do not trigger this workflow
 
 ## Required repository settings
 - Branch protection on `main` should require:
