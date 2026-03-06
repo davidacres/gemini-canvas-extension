@@ -1,0 +1,429 @@
+name: Sync plan milestones to GitHub issues
+
+"on":
+  workflow_dispatch:
+  push:
+    paths:
+      - gemini-canvas-extension.plan.md
+      - .github/workflows/plan-sync.yml
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: plan-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync milestones (create/update issues)
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PLAN_SYNC_TOKEN || github.token }}
+          script: |
+            const fs = require('fs');
+
+            const PLAN_PATH = 'gemini-canvas-extension.plan.md';
+            const BASE_LABELS = ['plan-sync'];
+            const MARKER_PREFIX = '<!-- gemini-canvas-extension:plan-sync key:';
+
+            // Optional GitHub Project (Projects v2) sync
+            // Configure via repo secret PLAN_SYNC_TOKEN if needed.
+            // This repo's project: https://github.com/users/davidacres/projects/4/
+            const PROJECT_V2 = {
+              enabled: true,
+              ownerType: 'user',
+              ownerLogin: 'davidacres',
+              number: 4,
+              statusFieldName: 'Status',
+              // Your board options:
+              // Backlog, Ready, In Progress, In Review, Done
+              defaultOpenStatus: 'Backlog',
+              closedStatus: 'Done',
+            };
+
+            function normalizeCell(text) {
+              return text
+                .replace(/^\*\*|\*\*$/g, '')
+                .replace(/`/g, '')
+                .trim();
+            }
+
+            function extractMilestoneRows(markdown) {
+              const startIdx = markdown.indexOf('## Milestones');
+              if (startIdx < 0) {
+                throw new Error('Could not find "## Milestones" section in plan file.');
+              }
+
+              const after = markdown.slice(startIdx);
+              const lines = after.split(/\r?\n/);
+
+              const tableLines = [];
+              let inTable = false;
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (!inTable) {
+                  if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+                    inTable = true;
+                    tableLines.push(trimmed);
+                  }
+                  continue;
+                }
+
+                if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+                  tableLines.push(trimmed);
+                } else if (trimmed === '') {
+                  break;
+                } else {
+                  break;
+                }
+              }
+
+              if (tableLines.length < 3) {
+                throw new Error('Milestones table not found or too short.');
+              }
+
+              // Drop header + separator
+              const dataLines = tableLines
+                .slice(2)
+                .filter(l => !/^\|\s*-+\s*\|/.test(l));
+
+              const rows = [];
+              for (const line of dataLines) {
+                const cells = line
+                  .split('|')
+                  .slice(1, -1)
+                  .map(c => normalizeCell(c));
+
+                if (cells.length < 4) continue;
+
+                const [milestoneRaw, goal, ships, exitCriteria] = cells;
+                const milestone = milestoneRaw.replace(/\s+/g, '');
+
+                if (!/^M\d+$/i.test(milestone)) continue;
+
+                rows.push({
+                  milestone: milestone.toUpperCase(),
+                  goal,
+                  ships,
+                  exitCriteria,
+                });
+              }
+
+              if (rows.length === 0) {
+                throw new Error('No milestone rows parsed from milestones table.');
+              }
+
+              return rows;
+            }
+
+            function renderIssue({ milestone, goal, ships, exitCriteria }) {
+              const marker = `${MARKER_PREFIX}${milestone} -->`;
+              const title = `[${milestone}] ${goal}`;
+
+              const body = [
+                marker,
+                '',
+                `This issue is synced from \`${PLAN_PATH}\`.`,
+                '',
+                '## Milestone',
+                `- **Goal:** ${goal}`,
+                `- **Ships:** ${ships}`,
+                `- **Exit criteria:** ${exitCriteria}`,
+                '',
+                '## Tasks',
+                '- [ ] Break down into actionable sub-tasks',
+                '- [ ] Implement smallest end-to-end slice',
+                '- [ ] Add/extend tests for acceptance + negative paths',
+                '- [ ] Verify UX gates (workspace feel + safety)',
+              ].join('\n');
+
+              const labels = [...BASE_LABELS, `milestone:${milestone}`];
+              return { title, body, labels };
+            }
+
+            async function ensureLabel(name) {
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name,
+                  color: '0e8a16',
+                  description: 'Managed by plan-sync workflow',
+                });
+              } catch (err) {
+                // 422: already exists
+                if (err?.status !== 422) throw err;
+              }
+            }
+
+            async function listAllIssuesWithLabel(label) {
+              const issues = [];
+              for await (const response of github.paginate.iterator(github.rest.issues.listForRepo, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: label,
+                state: 'all',
+                per_page: 100,
+              })) {
+                for (const issue of response.data) {
+                  // Exclude PRs
+                  if (issue.pull_request) continue;
+                  issues.push(issue);
+                }
+              }
+              return issues;
+            }
+
+            async function tryGetProjectV2() {
+              if (!PROJECT_V2.enabled) return null;
+
+              const query = PROJECT_V2.ownerType === 'org'
+                ? `query($login:String!, $number:Int!) { organization(login:$login){ projectV2(number:$number){ id title fields(first:50){ nodes{ __typename ... on ProjectV2SingleSelectField{ id name options{ id name } } ... on ProjectV2FieldCommon{ id name } } } } } }`
+                : `query($login:String!, $number:Int!) { user(login:$login){ projectV2(number:$number){ id title fields(first:50){ nodes{ __typename ... on ProjectV2SingleSelectField{ id name options{ id name } } ... on ProjectV2FieldCommon{ id name } } } } } } }`;
+
+              const resp = await github.graphql(query, { login: PROJECT_V2.ownerLogin, number: PROJECT_V2.number });
+              const ownerNode = PROJECT_V2.ownerType === 'org' ? resp.organization : resp.user;
+              return ownerNode?.projectV2 || null;
+            }
+
+            function findStatusOptionByName(statusField, desiredName) {
+              if (!statusField?.options?.length) return null;
+              const opt = statusField.options.find(o => (o.name || '').toLowerCase() === (desiredName || '').toLowerCase());
+              return opt || null;
+            }
+
+            async function listAllProjectItems(projectId) {
+              const items = [];
+              let cursor = null;
+              while (true) {
+                const query = `query($projectId:ID!, $cursor:String) {
+                  node(id:$projectId) {
+                    ... on ProjectV2 {
+                      items(first:100, after:$cursor) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes {
+                          id
+                          content {
+                            __typename
+                            ... on Issue { id number }
+                          }
+                          fieldValues(first:50) {
+                            nodes {
+                              __typename
+                              ... on ProjectV2ItemFieldSingleSelectValue {
+                                name
+                                field {
+                                  ... on ProjectV2SingleSelectField { id name }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }`;
+                const resp = await github.graphql(query, { projectId, cursor });
+                const page = resp?.node?.items;
+                if (!page?.nodes) break;
+                for (const n of page.nodes) items.push(n);
+                if (!page.pageInfo?.hasNextPage) break;
+                cursor = page.pageInfo.endCursor;
+              }
+              return items;
+            }
+
+            function getItemSingleSelectValueName(item, fieldId) {
+              const nodes = item?.fieldValues?.nodes || [];
+              for (const n of nodes) {
+                if (n?.__typename !== 'ProjectV2ItemFieldSingleSelectValue') continue;
+                if (n?.field?.id === fieldId) return n?.name || null;
+              }
+              return null;
+            }
+
+            async function addIssueToProjectIfMissing({ projectId, issueNodeId, existingItemsByIssueId }) {
+              const existingItem = existingItemsByIssueId.get(issueNodeId);
+              if (existingItem) return existingItem.id;
+
+              const mutation = `mutation($projectId:ID!, $contentId:ID!) {
+                addProjectV2ItemById(input:{ projectId:$projectId, contentId:$contentId }) {
+                  item { id }
+                }
+              }`;
+              const resp = await github.graphql(mutation, { projectId, contentId: issueNodeId });
+              return resp?.addProjectV2ItemById?.item?.id || null;
+            }
+
+            async function setProjectItemSingleSelect({ projectId, itemId, fieldId, optionId }) {
+              const mutation = `mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!) {
+                updateProjectV2ItemFieldValue(input:{
+                  projectId:$projectId,
+                  itemId:$itemId,
+                  fieldId:$fieldId,
+                  value:{ singleSelectOptionId:$optionId }
+                }) {
+                  projectV2Item { id }
+                }
+              }`;
+              await github.graphql(mutation, { projectId, itemId, fieldId, optionId });
+            }
+
+            function issueHasLabel(issue, name) {
+              const labels = Array.isArray(issue.labels) ? issue.labels : [];
+              return labels.some(l => (typeof l === 'string' ? l : l?.name) === name);
+            }
+
+            function findExistingIssue(issues, milestone) {
+              const marker = `${MARKER_PREFIX}${milestone} -->`;
+              const byMarker = issues.find(i => (i.body || '').includes(marker));
+              if (byMarker) return byMarker;
+
+              // Fallback: if marker was removed, match by label.
+              const milestoneLabel = `milestone:${milestone}`;
+              return issues.find(i => issueHasLabel(i, milestoneLabel));
+            }
+
+            const markdown = fs.readFileSync(PLAN_PATH, 'utf8');
+            const milestones = extractMilestoneRows(markdown);
+
+            // Ensure labels exist
+            const allLabels = new Set(BASE_LABELS);
+            for (const m of milestones) allLabels.add(`milestone:${m.milestone}`);
+            for (const name of allLabels) await ensureLabel(name);
+
+            const existing = await listAllIssuesWithLabel('plan-sync');
+
+            // Project v2 (best-effort): fetch project + cache items to avoid n+1 queries
+            let project = null;
+            let statusField = null;
+            let existingItemsByIssueId = new Map();
+            if (PROJECT_V2.enabled) {
+              try {
+                project = await tryGetProjectV2();
+                if (project?.id) {
+                  const fields = project.fields?.nodes || [];
+                  statusField = fields.find(f => f.__typename === 'ProjectV2SingleSelectField' && f.name === PROJECT_V2.statusFieldName) || null;
+
+                  const projectItems = await listAllProjectItems(project.id);
+                  for (const item of projectItems) {
+                    const content = item.content;
+                    if (content?.__typename === 'Issue' && content?.id) {
+                      existingItemsByIssueId.set(content.id, item);
+                    }
+                  }
+                }
+              } catch (e) {
+                core.warning(`Project sync disabled (could not access project v2): ${e.message || e}`);
+                project = null;
+              }
+            }
+
+            const results = [];
+            for (const m of milestones) {
+              const desired = renderIssue(m);
+              const match = findExistingIssue(existing, m.milestone);
+
+              if (match) {
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: match.number,
+                  title: desired.title,
+                  body: desired.body,
+                  labels: desired.labels,
+                });
+
+                // Project v2 sync (best-effort)
+                  if (project?.id && statusField?.id && match.node_id) {
+                  try {
+                      const existingItem = existingItemsByIssueId.get(match.node_id);
+                      const itemId = await addIssueToProjectIfMissing({
+                      projectId: project.id,
+                      issueNodeId: match.node_id,
+                      existingItemsByIssueId,
+                    });
+                    if (itemId) {
+                        // Don't stomp manual board moves.
+                        // Only set default status when empty, but always reflect closed issues as Done.
+                        const issueState = (match.state || '').toLowerCase();
+                        const itemForValueRead = existingItem || { id: itemId };
+                        const currentStatusName = existingItem ? getItemSingleSelectValueName(existingItem, statusField.id) : null;
+
+                        let desiredStatusName = null;
+                        if (issueState === 'closed') {
+                          desiredStatusName = PROJECT_V2.closedStatus;
+                        } else if (!currentStatusName) {
+                          desiredStatusName = PROJECT_V2.defaultOpenStatus;
+                        } else if (currentStatusName.toLowerCase() === PROJECT_V2.closedStatus.toLowerCase() && issueState === 'open') {
+                          // If reopened, ensure it doesn't stay "Done".
+                          desiredStatusName = PROJECT_V2.defaultOpenStatus;
+                        }
+
+                        if (desiredStatusName) {
+                          const desiredOpt = findStatusOptionByName(statusField, desiredStatusName);
+                          if (desiredOpt?.id) {
+                            await setProjectItemSingleSelect({
+                              projectId: project.id,
+                              itemId,
+                              fieldId: statusField.id,
+                              optionId: desiredOpt.id,
+                            });
+                          }
+                        }
+                    }
+                  } catch (e) {
+                    core.warning(`Project sync failed for issue #${match.number}: ${e.message || e}`);
+                  }
+                }
+
+                results.push(`updated #${match.number} (${m.milestone})`);
+              } else {
+                const created = await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title: desired.title,
+                  body: desired.body,
+                  labels: desired.labels,
+                });
+
+                // Project v2 sync (best-effort)
+                  if (project?.id && statusField?.id && created.data.node_id) {
+                  try {
+                    const itemId = await addIssueToProjectIfMissing({
+                      projectId: project.id,
+                      issueNodeId: created.data.node_id,
+                      existingItemsByIssueId,
+                    });
+                    if (itemId) {
+                        // Newly created open issues default to Backlog (unless already set by Project automation)
+                        const desiredOpt = findStatusOptionByName(statusField, PROJECT_V2.defaultOpenStatus);
+                        if (desiredOpt?.id) {
+                          await setProjectItemSingleSelect({
+                            projectId: project.id,
+                            itemId,
+                            fieldId: statusField.id,
+                            optionId: desiredOpt.id,
+                          });
+                        }
+                    }
+                  } catch (e) {
+                    core.warning(`Project sync failed for issue #${created.data.number}: ${e.message || e}`);
+                  }
+                }
+
+                results.push(`created #${created.data.number} (${m.milestone})`);
+              }
+            }
+
+            core.summary
+              .addHeading('Plan sync results')
+              .addList(results)
+              .write();
