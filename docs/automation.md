@@ -89,10 +89,23 @@ Recommended PR convention for phase branches:
     - selects dependency-ready milestones only
     - respects parallel cap (`max_parallel`, default 2)
     - creates `phase/Mx-*` branches from `plan-base`
-    - opens draft PRs into `plan-base`
+    - seeds a minimal kickoff commit on new phase branches (to guarantee PR diff)
+    - opens PRs into `plan-base`
   - Notes:
     - assignment to orchestrator can trigger kickoff
     - board status changes alone do not trigger this workflow
+
+- `.github/workflows/phase-automerge.yml`
+  - Enables GitHub auto-merge on `phase/* -> plan-base` PRs (squash)
+  - PR merges automatically once required checks pass
+
+- `.github/workflows/execution-controller.yml`
+  - Autonomous progression controller
+  - On merged `phase/* -> plan-base` PR:
+    - closes linked milestone issue(s) from PR body (`Closes #...`)
+    - dispatches kickoff again for next dependency-ready phases
+  - When all milestone issues are closed:
+    - dispatches `promote-plan-base.yml` to open/update promotion PR to `main`
 
 ## Required repository settings
 - Branch protection on `main` should require:
