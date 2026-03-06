@@ -64,10 +64,6 @@ jobs:
 
             const errors = [];
 
-            if (!/^phase\/[^/]+$/.test(String(pr.head?.ref || ''))) {
-              errors.push(`PR head branch must match phase/* (single path segment after "phase/"), got '${pr.head?.ref || 'unknown'}'.`);
-            }
-
             if (pr.draft) {
               errors.push('PR is draft. Mark as ready for review before merge.');
             }

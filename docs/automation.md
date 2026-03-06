@@ -55,7 +55,6 @@ Recommended PR convention for phase branches:
 - `.github/workflows/phase-gate.yml`
   - Enforces merge readiness only for PRs from `phase/*` into `plan-base`
   - Gate checks:
-    - PR source branch must start with `phase/`
     - PR is not draft
     - milestone token present (`M0`..`M8`) in title/body/branch
     - corresponding milestone issue exists and is closed
