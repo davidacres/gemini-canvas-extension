@@ -84,14 +84,11 @@ jobs:
             }
 
             async function listMergedPhasePrs() {
-              const prs = await github.paginate(github.rest.pulls.list, {
-                owner,
-                repo,
-                state: 'closed',
-                base: 'plan-base',
+              const result = await github.rest.search.issuesAndPullRequests({
+                q: `repo:${owner}/${repo} is:pr is:merged base:plan-base head:phase/`,
                 per_page: 100,
               });
-              return prs.filter(pr => pr.merged_at && String(pr.head?.ref || '').startsWith('phase/'));
+              return result.data.items;
             }
 
             async function reconcileMergedPhaseIssues() {
