@@ -4,11 +4,16 @@ This repository uses GitHub Actions to keep planning, board state, and PR flow a
 
 ## How work starts
 1. Plan milestones are defined in `gemini-canvas-extension.plan.md`.
-2. `plan-sync.yml` creates or updates one milestone issue per phase (`M0`..`M8`).
+2. `plan-sync.yml` creates or updates:
+  - one milestone issue per phase (`M0`..`M8`)
+  - one parent orchestration issue labeled `plan-orchestrator`
 3. Create a phase branch from `plan-base` (example: `phase/M3-design-mode`).
 4. Open a PR from phase branch into `plan-base`.
 5. Work starts when the milestone issue is moved to `Ready` or assigned.
 6. Board status then updates automatically from issue/PR events.
+
+Moving the parent orchestrator issue to `In Progress` and assigning it is a coordination signal.
+It does not auto-generate implementation code by itself.
 
 ## Branch strategy
 - `main`: stable integration branch
@@ -22,6 +27,12 @@ Recommended PR convention for phase branches:
 ## Workflows
 - `.github/workflows/plan-sync.yml`
   - Source of truth sync from plan file -> issues + project items
+  - Also manages a parent `plan-orchestrator` issue linking all milestone issues
+  - Writes machine-readable dependency metadata to milestone issues:
+    - `<!-- dependencies: Mx,My -->`
+  - Dependency source:
+    - preferred: optional `## Dependencies` table in plan
+    - fallback: sequential chain (`M1` depends on `M0`, etc.)
   - Triggers:
     - `push` to plan/workflow file
     - `issues` lifecycle events
@@ -63,14 +74,36 @@ Recommended PR convention for phase branches:
 - `.github/workflows/weekly-status-report.yml`
   - Weekly summary issue for milestone progress
 
+- `.github/workflows/ci.yml`
+  - Baseline CI for implementation branches and PRs
+  - Runs on `main`, `plan-base`, and working branches (`phase/*`, `chore/*`)
+  - Executes `lint`, `typecheck`, `test`, `build` scripts when present
+
+- `.github/workflows/kickoff-phase-work.yml`
+  - Starts execution from the orchestrator issue
+  - Triggers:
+    - assign/reopen/label events on orchestrator issue (`plan-orchestrator`)
+    - manual dispatch (`workflow_dispatch`)
+  - Behavior:
+    - reads open milestone issues and their dependency metadata
+    - selects dependency-ready milestones only
+    - respects parallel cap (`max_parallel`, default 2)
+    - creates `phase/Mx-*` branches from `plan-base`
+    - opens draft PRs into `plan-base`
+  - Notes:
+    - assignment to orchestrator can trigger kickoff
+    - board status changes alone do not trigger this workflow
+
 ## Required repository settings
 - Branch protection on `main` should require:
   - Pull request before merge
-  - Required checks
+  - Required checks:
+    - `Quality (ubuntu-latest)` from `.github/workflows/ci.yml`
   - Approvals optional (currently 0 required)
 - Branch protection on `plan-base` should require:
   - Pull request before merge
-  - Required checks optional (currently none required in single-maintainer mode)
+  - Required checks:
+    - `Quality (ubuntu-latest)` from `.github/workflows/ci.yml`
   - Approvals optional (currently 0 required)
 - Optional: CODEOWNERS for deterministic reviewer routing
 
