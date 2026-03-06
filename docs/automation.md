@@ -78,6 +78,11 @@ Recommended PR convention for phase branches:
   - Required approvals
 - Optional: CODEOWNERS for deterministic reviewer routing
 
+You can enforce these automatically by running:
+- `.github/workflows/apply-branch-protection.yml`
+
+This uses `PLAN_SYNC_TOKEN` in Actions. Local `gh` CLI tokens may not have admin scope for branch protection updates.
+
 ## Required secrets
 - `PLAN_SYNC_TOKEN` (recommended classic PAT)
   - scopes:
