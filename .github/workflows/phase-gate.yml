@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   phase-gate:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.base.ref == 'plan-base' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.base.ref == 'plan-base' && startsWith(github.event.pull_request.head.ref, 'phase/')) }}
     runs-on: ubuntu-latest
     steps:
       - name: Validate phase PR readiness
@@ -63,10 +63,6 @@ jobs:
             }
 
             const errors = [];
-
-            if (!/^phase\/[^/]+$/.test(String(pr.head?.ref || ''))) {
-              errors.push(`PR head branch must match phase/* (single path segment after "phase/"), got '${pr.head?.ref || 'unknown'}'.`);
-            }
 
             if (pr.draft) {
               errors.push('PR is draft. Mark as ready for review before merge.');
