@@ -73,9 +73,7 @@ Recommended PR convention for phase branches:
   - Approvals optional (currently 0 required)
 - Branch protection on `plan-base` should require:
   - Pull request before merge
-  - Required checks:
-    - `Phase gate / phase-gate`
-    - your CI/test checks
+  - Required checks optional (currently none required in single-maintainer mode)
   - Approvals optional (currently 0 required)
 - Optional: CODEOWNERS for deterministic reviewer routing
 
