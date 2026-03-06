@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   phase-gate:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.base.ref == 'plan-base' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.base.ref == 'plan-base' && startsWith(github.event.pull_request.head.ref, 'phase/')) }}
     runs-on: ubuntu-latest
     steps:
       - name: Validate phase PR readiness
@@ -62,14 +62,10 @@ jobs:
               return issues[0] || null;
             }
 
-            async function getReviews(pullNumber) {
-              const res = await github.rest.pulls.listReviews({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: pullNumber,
-                per_page: 100,
-              });
-              return res.data || [];
+            function linksIssueForClosure(prText, issueNumber) {
+              if (!issueNumber) return false;
+              const re = new RegExp(`(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+#${issueNumber}\\b`, 'i');
+              return re.test(prText || '');
             }
 
             const errors = [];
@@ -98,31 +94,9 @@ jobs:
               }
             }
 
-            if (milestoneIssue && milestoneIssue.state !== 'closed') {
-              errors.push(`Milestone issue #${milestoneIssue.number} (${milestone}) is not closed.`);
-            }
-
-            const reviews = await getReviews(pr.number);
-            const latestByUser = new Map();
-            for (const r of reviews) {
-              if (!r.user?.login) continue;
-              latestByUser.set(r.user.login, (r.state || '').toUpperCase());
-            }
-
-            const approvedCount = [...latestByUser.values()].filter(s => s === 'APPROVED').length;
-            const changeRequestedCount = [...latestByUser.values()].filter(s => s === 'CHANGES_REQUESTED').length;
-
-            if (approvedCount < 1) {
-              errors.push('At least one APPROVED review is required.');
-            }
-
-            if (changeRequestedCount > 0) {
-              errors.push('There is at least one active CHANGES_REQUESTED review.');
-            }
-
-            const labels = (pr.labels || []).map(l => l.name);
-            if (!labels.includes('ready-to-merge')) {
-              errors.push("Missing 'ready-to-merge' label from PR automation.");
+            const prText = `${pr.title || ''}\n${pr.body || ''}`;
+            if (milestoneIssue && !linksIssueForClosure(prText, milestoneIssue.number)) {
+              errors.push(`PR must include a closing reference to milestone issue #${milestoneIssue.number} (e.g. \`Closes #${milestoneIssue.number}\`).`);
             }
 
             if (errors.length) {
@@ -136,10 +110,8 @@ jobs:
 
             const info = [
               `Milestone: ${milestone}`,
-              `Milestone issue: #${milestoneIssue.number} (closed)`,
-              `Approvals: ${approvedCount}`,
-              'No active change requests',
-              "PR labeled 'ready-to-merge'",
+              `Milestone issue: #${milestoneIssue.number} (linked for closure)`,
+              'Approval/label gate disabled for single-maintainer workflow',
             ];
 
             core.summary
