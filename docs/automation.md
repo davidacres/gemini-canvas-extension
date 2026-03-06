@@ -95,7 +95,7 @@ Recommended PR convention for phase branches:
     - auto-assigns started milestone issues to preferred allowed assignee (first entry in `KICKOFF_ALLOWED_ASSIGNEES`, default `copilot`)
     - creates `phase/Mx-*` branches from `plan-base`
     - seeds a minimal kickoff commit on new phase branches (to guarantee PR diff)
-    - opens draft PRs into `plan-base`
+    - opens PRs into `plan-base`
   - Notes:
     - assignment to orchestrator can trigger batched kickoff
     - marking orchestrator `state:ready` can also trigger batched kickoff
