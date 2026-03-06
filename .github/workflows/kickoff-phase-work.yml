@@ -127,14 +127,25 @@ jobs:
               });
             }
 
-            async function ensureSeedCommit(refName, milestone, issueNumber) {
+            async function sleep(ms) {
+              await new Promise(resolve => setTimeout(resolve, ms));
+            }
+
+            async function ensureSeedCommit(refName, milestone, issueNumber, skipCompare = false) {
               // If there are no commits ahead of base, PR creation fails. Seed with a small kickoff file.
-              const cmp = await github.rest.repos.compareCommits({
-                owner,
-                repo,
-                basehead: `${BASE_BRANCH}...${refName}`,
-              });
-              if ((cmp.data.total_commits || 0) > 0) return;
+              if (!skipCompare) {
+                try {
+                  const cmp = await github.rest.repos.compareCommits({
+                    owner,
+                    repo,
+                    basehead: `${BASE_BRANCH}...${refName}`,
+                  });
+                  if ((cmp.data.total_commits || 0) > 0) return;
+                } catch (e) {
+                  // If compare temporarily fails (ref propagation race), continue and try to seed anyway.
+                  if (e?.status !== 404) throw e;
+                }
+              }
 
               const path = `.phase-kickoff/${milestone}.md`;
               let existingSha = null;
@@ -160,15 +171,26 @@ jobs:
                 if (e?.status !== 404) throw e;
               }
 
-              await github.rest.repos.createOrUpdateFileContents({
-                owner,
-                repo,
-                path,
-                branch: refName,
-                message: `chore(${milestone}): seed kickoff branch`,
-                content: Buffer.from(content, 'utf8').toString('base64'),
-                ...(existingSha ? { sha: existingSha } : {}),
-              });
+              for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                  await github.rest.repos.createOrUpdateFileContents({
+                    owner,
+                    repo,
+                    path,
+                    branch: refName,
+                    message: `chore(${milestone}): seed kickoff branch`,
+                    content: Buffer.from(content, 'utf8').toString('base64'),
+                    ...(existingSha ? { sha: existingSha } : {}),
+                  });
+                  return;
+                } catch (e) {
+                  if (e?.status === 404 && attempt < 2) {
+                    await sleep(1500);
+                    continue;
+                  }
+                  throw e;
+                }
+              }
             }
             async function findOpenPrByHead(headRef) {
               const prs = await github.paginate(github.rest.pulls.list, {
@@ -295,12 +317,14 @@ jobs:
 
               try {
                 const exists = await branchExists(headRef);
+                let createdNow = false;
                 if (!exists && !dryRun) {
                   await createBranch(headRef, baseSha);
+                  createdNow = true;
                 }
 
                 if (!dryRun) {
-                  await ensureSeedCommit(headRef, milestone, issue.number);
+                  await ensureSeedCommit(headRef, milestone, issue.number, createdNow);
                 }
                 let pr = await findOpenPrByHead(headRef);
                 if (!pr && !dryRun) {
