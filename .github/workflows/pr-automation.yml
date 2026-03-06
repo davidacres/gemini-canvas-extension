@@ -142,6 +142,55 @@ jobs:
               }
             }
 
+            async function listChangedFiles(prNumber) {
+              return await github.paginate(github.rest.pulls.listFiles, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                per_page: 100,
+              });
+            }
+
+            function hasRealWorkChanges(files) {
+              return (files || []).some(f => {
+                const name = String(f.filename || '');
+                return !name.startsWith('.phase-kickoff/');
+              });
+            }
+
+            async function maybeMarkReadyForReview(pr) {
+              if (!pr?.number || !pr?.node_id) return pr;
+              if (!pr.draft || pr.state !== 'open') return pr;
+              if (pr.base?.ref !== 'plan-base') return pr;
+              if (!String(pr.head?.ref || '').startsWith('phase/')) return pr;
+
+              const files = await listChangedFiles(pr.number);
+              if (!hasRealWorkChanges(files)) {
+                core.info(`PR #${pr.number} still has kickoff-only changes; staying draft.`);
+                return pr;
+              }
+
+              const mutation = `mutation($pullRequestId:ID!) {
+                markPullRequestReadyForReview(input:{ pullRequestId:$pullRequestId }) {
+                  pullRequest { number }
+                }
+              }`;
+
+              try {
+                await github.graphql(mutation, { pullRequestId: pr.node_id });
+                core.info(`Marked PR #${pr.number} ready for review (real changes detected).`);
+                const refreshed = await github.rest.pulls.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: pr.number,
+                });
+                return refreshed.data;
+              } catch (e) {
+                core.warning(`Could not mark PR #${pr.number} ready for review: ${e.message || e}`);
+                return pr;
+              }
+            }
+
             let pr = getPrFromPayload();
             if (!pr && eventName === 'pull_request_review') {
               pr = await getPrFromReviewPayload();
@@ -156,6 +205,10 @@ jobs:
             const configuredReviewers = parseReviewers(process.env.AUTO_REVIEWERS || '');
 
             if (eventName === 'pull_request_target') {
+              if (action === 'opened' || action === 'reopened' || action === 'synchronize') {
+                pr = await maybeMarkReadyForReview(pr);
+              }
+
               const isDraft = !!pr.draft;
               if (action === 'opened' || action === 'reopened' || action === 'ready_for_review' || action === 'converted_to_draft' || action === 'synchronize') {
                 await replaceWorkflowLabels(pr.number, isDraft ? 'wip' : 'needs-review');

@@ -1,0 +1,190 @@
+name: Project status -> issue labels
+
+"on":
+  workflow_dispatch:
+  projects_v2_item:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: project-status-label-sync-${{ github.event.projects_v2_item.node_id || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  sync-labels:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mirror project Status to state labels
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PLAN_SYNC_TOKEN || github.token }}
+          script: |
+            const CONFIG = {
+              ownerType: 'user',
+              ownerLogin: 'davidacres',
+              projectNumber: 4,
+              statusFieldName: 'Status',
+              statusToLabel: {
+                backlog: 'state:backlog',
+                ready: 'state:ready',
+                'in progress': 'state:in-progress',
+                'in review': 'state:in-review',
+                done: 'state:done',
+              },
+              managedStateLabels: [
+                'state:backlog',
+                'state:ready',
+                'state:in-progress',
+                'state:in-review',
+                'state:done',
+              ],
+            };
+
+            function lower(s) {
+              return String(s || '').trim().toLowerCase();
+            }
+
+            async function getProject() {
+              const query = CONFIG.ownerType === 'org'
+                ? `query($login:String!, $number:Int!) {
+                    organization(login:$login) {
+                      projectV2(number:$number) { id }
+                    }
+                  }`
+                : `query($login:String!, $number:Int!) {
+                    user(login:$login) {
+                      projectV2(number:$number) { id }
+                    }
+                  }`;
+
+              const resp = await github.graphql(query, {
+                login: CONFIG.ownerLogin,
+                number: CONFIG.projectNumber,
+              });
+              const node = CONFIG.ownerType === 'org' ? resp.organization : resp.user;
+              return node?.projectV2 || null;
+            }
+
+            async function getItemDetails(itemId) {
+              const query = `query($itemId:ID!, $statusFieldName:String!) {
+                node(id:$itemId) {
+                  ... on ProjectV2Item {
+                    id
+                    project { id }
+                    fieldValueByName(name:$statusFieldName) {
+                      __typename
+                      ... on ProjectV2ItemFieldSingleSelectValue {
+                        name
+                      }
+                    }
+                    content {
+                      __typename
+                      ... on Issue {
+                        id
+                        number
+                        repository { nameWithOwner }
+                      }
+                    }
+                  }
+                }
+              }`;
+
+              const resp = await github.graphql(query, {
+                itemId,
+                statusFieldName: CONFIG.statusFieldName,
+              });
+              return resp?.node || null;
+            }
+
+            async function ensureLabel(name) {
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name,
+                  color: '1d76db',
+                  description: 'Managed by project-status-label-sync',
+                });
+              } catch (e) {
+                if (e?.status !== 422) throw e;
+              }
+            }
+
+            async function syncIssueLabels(issueNumber, targetLabel) {
+              const issueRes = await github.rest.issues.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+              });
+              if (issueRes.data.pull_request) return 'ignored (content is PR)';
+
+              const existing = (issueRes.data.labels || [])
+                .map(l => (typeof l === 'string' ? l : l?.name))
+                .filter(Boolean);
+
+              const kept = existing.filter(name => !CONFIG.managedStateLabels.includes(name));
+              const next = targetLabel ? [...new Set([...kept, targetLabel])] : kept;
+
+              await github.rest.issues.setLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                labels: next,
+              });
+              return `set labels (${targetLabel || 'no state label'})`;
+            }
+
+            const itemId = context.payload?.projects_v2_item?.node_id;
+            if (!itemId) {
+              core.info('No projects_v2_item.node_id in payload. Nothing to do.');
+              return;
+            }
+
+            const configuredProject = await getProject();
+            if (!configuredProject?.id) {
+              core.warning('Configured project not found.');
+              return;
+            }
+
+            const item = await getItemDetails(itemId);
+            if (!item?.id) {
+              core.info('Project item not found.');
+              return;
+            }
+
+            if (item.project?.id !== configuredProject.id) {
+              core.info('Ignoring event for a different project.');
+              return;
+            }
+
+            const content = item.content;
+            if (content?.__typename !== 'Issue') {
+              core.info('Project item content is not an issue.');
+              return;
+            }
+
+            const [owner, repo] = String(content.repository?.nameWithOwner || '').split('/');
+            if (owner !== context.repo.owner || repo !== context.repo.repo) {
+              core.info('Issue belongs to a different repository.');
+              return;
+            }
+
+            const statusName = lower(item.fieldValueByName?.name);
+            const targetLabel = CONFIG.statusToLabel[statusName] || null;
+
+            if (targetLabel) {
+              await ensureLabel(targetLabel);
+            }
+
+            const result = await syncIssueLabels(content.number, targetLabel);
+            core.summary
+              .addHeading('Project status -> label sync')
+              .addList([
+                `Issue #${content.number}`,
+                `Status: ${statusName || '(none)'}`,
+                `Target label: ${targetLabel || '(none)'}`,
+                `Result: ${result}`,
+              ])
+              .write();
