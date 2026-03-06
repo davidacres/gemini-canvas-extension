@@ -42,6 +42,8 @@ jobs:
             const PLAN_PATH = 'gemini-canvas-extension.plan.md';
             const BASE_LABELS = ['plan-sync'];
             const MARKER_PREFIX = '<!-- gemini-canvas-extension:plan-sync key:';
+            const ORCHESTRATOR_KEY = 'ORCHESTRATOR';
+            const ORCHESTRATOR_LABEL = 'plan-orchestrator';
 
             // Optional GitHub Project (Projects v2) sync
             // Configure via repo secret PLAN_SYNC_TOKEN if needed.
@@ -134,12 +136,78 @@ jobs:
               return rows;
             }
 
-            function renderIssue({ milestone, goal, ships, exitCriteria }) {
+            function extractDependencyMap(markdown, milestones) {
+              const keySet = new Set(milestones.map(m => m.milestone));
+
+              // Optional section format:
+              // ## Dependencies
+              // | Milestone | Depends On |
+              // |---|---|
+              // | M3 | M1, M2 |
+              const sectionIdx = markdown.indexOf('## Dependencies');
+              if (sectionIdx < 0) {
+                // Fallback: sequential dependency chain (M1 depends on M0, etc.).
+                const out = new Map();
+                for (let i = 0; i < milestones.length; i++) {
+                  const cur = milestones[i].milestone;
+                  out.set(cur, i === 0 ? [] : [milestones[i - 1].milestone]);
+                }
+                return out;
+              }
+
+              const after = markdown.slice(sectionIdx);
+              const lines = after.split(/\r?\n/);
+              const tableLines = [];
+              let inTable = false;
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (!inTable) {
+                  if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+                    inTable = true;
+                    tableLines.push(trimmed);
+                  }
+                  continue;
+                }
+                if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+                  tableLines.push(trimmed);
+                } else {
+                  break;
+                }
+              }
+
+              const out = new Map();
+              for (const m of milestones) out.set(m.milestone, []);
+
+              if (tableLines.length >= 3) {
+                const dataLines = tableLines.slice(2);
+                for (const line of dataLines) {
+                  const cells = line.split('|').slice(1, -1).map(c => normalizeCell(c));
+                  if (cells.length < 2) continue;
+                  const milestone = (cells[0] || '').replace(/\s+/g, '').toUpperCase();
+                  if (!keySet.has(milestone)) continue;
+                  const deps = (cells[1] || '')
+                    .split(',')
+                    .map(s => s.trim().toUpperCase())
+                    .filter(Boolean)
+                    .map(s => s.replace(/\s+/g, ''))
+                    .filter(d => keySet.has(d) && d !== milestone);
+                  out.set(milestone, [...new Set(deps)]);
+                }
+                return out;
+              }
+
+              return out;
+            }
+
+            function renderIssue({ milestone, goal, ships, exitCriteria, dependsOn }) {
               const marker = `${MARKER_PREFIX}${milestone} -->`;
               const title = `[${milestone}] ${goal}`;
+              const depList = Array.isArray(dependsOn) ? dependsOn : [];
+              const depMarker = `<!-- dependencies: ${depList.join(',')} -->`;
 
               const body = [
                 marker,
+                depMarker,
                 '',
                 `This issue is synced from \`${PLAN_PATH}\`.`,
                 '',
@@ -147,6 +215,11 @@ jobs:
                 `- **Goal:** ${goal}`,
                 `- **Ships:** ${ships}`,
                 `- **Exit criteria:** ${exitCriteria}`,
+                '',
+                '## Dependencies',
+                ...(depList.length
+                  ? depList.map(d => `- blocked-by: ${d}`)
+                  : ['- None']),
                 '',
                 '## Tasks',
                 '- [ ] Break down into actionable sub-tasks',
@@ -156,6 +229,43 @@ jobs:
               ].join('\n');
 
               const labels = [...BASE_LABELS, `milestone:${milestone}`];
+              return { title, body, labels };
+            }
+
+            function renderOrchestratorIssue({ milestones, milestoneIssueByKey }) {
+              const marker = `${MARKER_PREFIX}${ORCHESTRATOR_KEY} -->`;
+              const title = 'Execution Orchestrator: Gemini Canvas Plan';
+
+              const milestoneLines = milestones.map(m => {
+                const issue = milestoneIssueByKey.get(m.milestone);
+                const issueRef = issue ? `#${issue.number}` : '(not yet created)';
+                return `- [ ] ${m.milestone}: ${m.goal} (${issueRef})`;
+              });
+
+              const body = [
+                marker,
+                '',
+                `This parent issue is synced from \`${PLAN_PATH}\`.`,
+                '',
+                '## Purpose',
+                '- Orchestrate end-to-end delivery of milestone phases.',
+                '- Track sequencing, risks, and promotion from `plan-base` to `main`.',
+                '',
+                '## Linked Milestones',
+                ...milestoneLines,
+                '',
+                '## Kickoff Checklist',
+                '- [ ] Move this issue to `In Progress` when execution starts',
+                '- [ ] Assign owner(s) responsible for orchestration',
+                '- [ ] Confirm first active milestone and create phase branch from `plan-base`',
+                '- [ ] Open first phase PR into `plan-base`',
+                '',
+                '## Notes',
+                '- This issue is orchestration-only; implementation should close milestone issues directly.',
+                '- Assigning this issue does not auto-generate code by itself.',
+              ].join('\n');
+
+              const labels = [...BASE_LABELS, ORCHESTRATOR_LABEL];
               return { title, body, labels };
             }
 
@@ -344,12 +454,21 @@ jobs:
               return issues.find(i => issueHasLabel(i, milestoneLabel));
             }
 
+            function findOrchestratorIssue(issues) {
+              const marker = `${MARKER_PREFIX}${ORCHESTRATOR_KEY} -->`;
+              const byMarker = issues.find(i => (i.body || '').includes(marker));
+              if (byMarker) return byMarker;
+              return issues.find(i => issueHasLabel(i, ORCHESTRATOR_LABEL));
+            }
+
             const markdown = fs.readFileSync(PLAN_PATH, 'utf8');
             const milestones = extractMilestoneRows(markdown);
+            const dependencyMap = extractDependencyMap(markdown, milestones);
 
             // Ensure labels exist
             const allLabels = new Set(BASE_LABELS);
             for (const m of milestones) allLabels.add(`milestone:${m.milestone}`);
+            allLabels.add(ORCHESTRATOR_LABEL);
             for (const name of allLabels) await ensureLabel(name);
 
             const existing = await listAllIssuesWithLabel('plan-sync');
@@ -380,8 +499,12 @@ jobs:
             }
 
             const results = [];
+            const milestoneIssueByKey = new Map();
             for (const m of milestones) {
-              const desired = renderIssue(m);
+              const desired = renderIssue({
+                ...m,
+                dependsOn: dependencyMap.get(m.milestone) || [],
+              });
               const match = findExistingIssue(existing, m.milestone);
 
               if (match) {
@@ -437,6 +560,8 @@ jobs:
                   }
                 }
 
+                milestoneIssueByKey.set(m.milestone, { number: match.number, node_id: match.node_id, state: match.state });
+
                 results.push(`updated #${match.number} (${m.milestone})`);
               } else {
                 const created = await github.rest.issues.create({
@@ -472,8 +597,94 @@ jobs:
                   }
                 }
 
+                milestoneIssueByKey.set(m.milestone, { number: created.data.number, node_id: created.data.node_id, state: created.data.state });
+
                 results.push(`created #${created.data.number} (${m.milestone})`);
               }
+            }
+
+            // Create/update orchestrator issue after milestone issue numbers are known.
+            const orchestratorDesired = renderOrchestratorIssue({ milestones, milestoneIssueByKey });
+            const orchestratorMatch = findOrchestratorIssue(existing);
+
+            if (orchestratorMatch) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: orchestratorMatch.number,
+                title: orchestratorDesired.title,
+                body: orchestratorDesired.body,
+                labels: orchestratorDesired.labels,
+              });
+
+              if (project?.id && statusField?.id && orchestratorMatch.node_id) {
+                try {
+                  const existingItem = existingItemsByIssueId.get(orchestratorMatch.node_id);
+                  const itemId = await addIssueToProjectIfMissing({
+                    projectId: project.id,
+                    issueNodeId: orchestratorMatch.node_id,
+                    existingItemsByIssueId,
+                  });
+                  if (itemId) {
+                    const issueState = (orchestratorMatch.state || '').toLowerCase();
+                    const currentStatusName = existingItem ? getItemSingleSelectValueName(existingItem, statusField.id) : null;
+                    let desiredStatusName = null;
+                    if (issueState === 'closed') {
+                      desiredStatusName = PROJECT_V2.closedStatus;
+                    } else if (!currentStatusName) {
+                      desiredStatusName = PROJECT_V2.defaultOpenStatus;
+                    }
+                    if (desiredStatusName) {
+                      const desiredOpt = findStatusOptionByName(statusField, desiredStatusName);
+                      if (desiredOpt?.id) {
+                        await setProjectItemSingleSelect({
+                          projectId: project.id,
+                          itemId,
+                          fieldId: statusField.id,
+                          optionId: desiredOpt.id,
+                        });
+                      }
+                    }
+                  }
+                } catch (e) {
+                  core.warning(`Project sync failed for orchestrator issue #${orchestratorMatch.number}: ${e.message || e}`);
+                }
+              }
+
+              results.push(`updated #${orchestratorMatch.number} (${ORCHESTRATOR_KEY})`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: orchestratorDesired.title,
+                body: orchestratorDesired.body,
+                labels: orchestratorDesired.labels,
+              });
+
+              if (project?.id && statusField?.id && created.data.node_id) {
+                try {
+                  const itemId = await addIssueToProjectIfMissing({
+                    projectId: project.id,
+                    issueNodeId: created.data.node_id,
+                    existingItemsByIssueId,
+                  });
+                  if (itemId) {
+                    const desiredOpt = findStatusOptionByName(statusField, PROJECT_V2.defaultOpenStatus);
+                    if (desiredOpt?.id) {
+                      await setProjectItemSingleSelect({
+                        projectId: project.id,
+                        itemId,
+                        fieldId: statusField.id,
+                        optionId: desiredOpt.id,
+                      });
+                    }
+                  }
+                } catch (e) {
+                  core.warning(`Project sync failed for orchestrator issue #${created.data.number}: ${e.message || e}`);
+                }
+              }
+
+              results.push(`created #${created.data.number} (${ORCHESTRATOR_KEY})`);
             }
 
             core.summary
