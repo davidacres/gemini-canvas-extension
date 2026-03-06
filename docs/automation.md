@@ -4,11 +4,16 @@ This repository uses GitHub Actions to keep planning, board state, and PR flow a
 
 ## How work starts
 1. Plan milestones are defined in `gemini-canvas-extension.plan.md`.
-2. `plan-sync.yml` creates or updates one milestone issue per phase (`M0`..`M8`).
+2. `plan-sync.yml` creates or updates:
+  - one milestone issue per phase (`M0`..`M8`)
+  - one parent orchestration issue labeled `plan-orchestrator`
 3. Create a phase branch from `plan-base` (example: `phase/M3-design-mode`).
 4. Open a PR from phase branch into `plan-base`.
 5. Work starts when the milestone issue is moved to `Ready` or assigned.
 6. Board status then updates automatically from issue/PR events.
+
+Moving the parent orchestrator issue to `In Progress` and assigning it is a coordination signal.
+It does not auto-generate implementation code by itself.
 
 ## Branch strategy
 - `main`: stable integration branch
@@ -22,6 +27,7 @@ Recommended PR convention for phase branches:
 ## Workflows
 - `.github/workflows/plan-sync.yml`
   - Source of truth sync from plan file -> issues + project items
+  - Also manages a parent `plan-orchestrator` issue linking all milestone issues
   - Triggers:
     - `push` to plan/workflow file
     - `issues` lifecycle events
