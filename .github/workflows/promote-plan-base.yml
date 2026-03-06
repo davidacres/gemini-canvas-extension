@@ -1,0 +1,64 @@
+name: Promote plan-base to main
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create or update PR from plan-base to main
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PLAN_SYNC_TOKEN || github.token }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const head = 'plan-base';
+            const base = 'main';
+
+            const title = 'Promote plan-base to main';
+            const body = [
+              'Automated promotion PR from `plan-base` to `main`.',
+              '',
+              'This PR aggregates phase-complete changes after passing gate checks.',
+            ].join('\n');
+
+            const q = `repo:${owner}/${repo} is:pr is:open head:${owner}:${head} base:${base}`;
+            const existing = await github.rest.search.issuesAndPullRequests({ q, per_page: 1 });
+            const openPr = (existing.data.items || [])[0];
+
+            if (openPr) {
+              await github.rest.pulls.update({
+                owner,
+                repo,
+                pull_number: openPr.number,
+                title,
+                body,
+              });
+              core.info(`Updated existing promotion PR #${openPr.number}`);
+              return;
+            }
+
+            try {
+              const created = await github.rest.pulls.create({
+                owner,
+                repo,
+                head,
+                base,
+                title,
+                body,
+                maintainer_can_modify: true,
+              });
+              core.info(`Created promotion PR #${created.data.number}`);
+            } catch (e) {
+              if ((e.message || '').includes('No commits between')) {
+                core.info('No commits to promote from plan-base to main.');
+                return;
+              }
+              throw e;
+            }
