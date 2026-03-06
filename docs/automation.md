@@ -51,6 +51,17 @@ Recommended PR convention for phase branches:
     - PR draft or converted_to_draft -> `In Progress`
     - Merged PR -> `Done`
 
+- `.github/workflows/project-status-label-sync.yml`
+  - Mirrors Project v2 `Status` field back to issue labels (`state:*`)
+  - Trigger: `projects_v2_item` changes (for project item edits)
+  - Status mapping:
+    - `Backlog` -> `state:backlog`
+    - `Ready` -> `state:ready`
+    - `In Progress` -> `state:in-progress`
+    - `In Review` -> `state:in-review`
+    - `Done` -> `state:done`
+  - This enables board column moves (for example to `Ready`) to create label events that kickoff automation can consume.
+
 - `.github/workflows/pr-automation.yml`
   - PR labels/reviewers/auto-merge helper
   - For `phase/* -> plan-base` PRs, auto-converts draft to ready-for-review when non-kickoff files are detected
@@ -105,7 +116,7 @@ Recommended PR convention for phase branches:
     - milestone issue kickoff is gated by assignee allow-list (default: `copilot`)
       - configure repository variable `KICKOFF_ALLOWED_ASSIGNEES` as comma-separated GitHub logins
     - if kickoff is skipped by assignee policy, the workflow comments the reason on the milestone issue
-    - board status column moves alone do not trigger this workflow (use labels/assignment)
+    - board status column moves are converted to labels by `project-status-label-sync.yml`; kickoff still responds to issue label/assignment events
 
 - `.github/workflows/phase-automerge.yml`
   - Enables GitHub auto-merge on `phase/* -> plan-base` PRs (squash)
