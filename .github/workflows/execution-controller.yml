@@ -1,6 +1,8 @@
 name: Execution controller
 
 "on":
+  schedule:
+    - cron: "*/15 * * * *"
   workflow_dispatch:
   pull_request_target:
     types:
@@ -81,6 +83,33 @@ jobs:
               return issues.filter(i => !i.pull_request && hasMilestoneLabel(i));
             }
 
+            async function listMergedPhasePrs() {
+              const result = await github.rest.search.issuesAndPullRequests({
+                q: `repo:${owner}/${repo} is:pr is:merged base:plan-base head:phase/`,
+                per_page: 100,
+              });
+              return result.data.items;
+            }
+
+            async function reconcileMergedPhaseIssues() {
+              let closedCount = 0;
+              const mergedPhasePrs = await listMergedPhasePrs();
+
+              for (const pr of mergedPhasePrs) {
+                const linked = parseLinkedIssueNumbers(`${pr.title || ''}\n${pr.body || ''}`);
+                for (const n of linked) {
+                  const issue = await getIssue(n);
+                  if (!issue) continue;
+                  if (!hasMilestoneLabel(issue)) continue;
+                  if ((issue.state || '').toLowerCase() === 'closed') continue;
+                  await closeIssue(n, `reconciled merged phase PR #${pr.number}`);
+                  closedCount += 1;
+                }
+              }
+
+              return closedCount;
+            }
+
             async function dispatchWorkflow(workflowId, ref, inputs) {
               await github.rest.actions.createWorkflowDispatch({
                 owner,
@@ -92,6 +121,7 @@ jobs:
             }
 
             let phaseAdvanceTriggered = false;
+            let reconciledCloseCount = 0;
 
             // 1) If a phase PR merged into plan-base, close linked milestone issues.
             if (context.eventName === 'pull_request' || context.eventName === 'pull_request_target') {
@@ -110,11 +140,17 @@ jobs:
               } else {
                 core.info('PR event is not a merged phase PR into plan-base; skipping close step (eventName=' + context.eventName + ').');
               }
+            } else if (context.eventName === 'workflow_dispatch' || context.eventName === 'schedule') {
+              reconciledCloseCount = await reconcileMergedPhaseIssues();
+              phaseAdvanceTriggered = reconciledCloseCount > 0;
+              core.info(`Reconciled merged phase PRs; auto-closed ${reconciledCloseCount} milestone issue(s).`);
             } else {
               core.info(`Ignoring event ${context.eventName}; execution advances only from merged phase PRs.`);
             }
 
-            if (context.eventName !== 'workflow_dispatch' && !phaseAdvanceTriggered) {
+            const isReconcileRun = context.eventName === 'workflow_dispatch' || context.eventName === 'schedule';
+
+            if (!isReconcileRun && !phaseAdvanceTriggered) {
               core.info('No merged phase PR detected; skipping kickoff/promotion dispatch.');
               return;
             }
@@ -127,6 +163,11 @@ jobs:
                 dry_run: 'false',
               });
               core.info(`Dispatched kickoff workflow. Open milestone count: ${openMilestones.length}`);
+              return;
+            }
+
+            if (context.eventName === 'schedule' && !phaseAdvanceTriggered) {
+              core.info('Schedule run found no open milestones and no newly reconciled completions; skipping promotion dispatch.');
               return;
             }
 

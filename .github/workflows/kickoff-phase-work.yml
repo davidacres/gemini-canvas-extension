@@ -1,6 +1,16 @@
 name: Kickoff phase work
 
 "on":
+  push:
+    branches:
+      - main
+      - plan-base
+    paths:
+      - .github/workflows/kickoff-phase-work.yml
+      - .github/workflows/execution-controller.yml
+      - gemini-canvas-extension.plan.md
+  schedule:
+    - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
       max_parallel:
@@ -14,7 +24,9 @@ name: Kickoff phase work
   issues:
     types:
       - assigned
+      - opened
       - reopened
+      - edited
       - labeled
 
 permissions:
@@ -213,11 +225,11 @@ jobs:
               const isReadyLabelEvent = action === 'labeled' && READY_LABELS.has(eventLabel);
 
               if (isOrchestrator) {
-                // Kick only from explicit orchestration signals. Assignment is ignored so Copilot
-                // does not start implementation work from the parent orchestration issue.
-                const shouldKick = isReadyLabelEvent || labels.includes('kickoff');
+                // Kickoff on orchestrator issue events except assignment. Assignment is ignored so Copilot
+                // does not start implementation work solely from adding an assignee to the parent orchestration issue.
+                const shouldKick = action !== 'assigned';
                 if (!shouldKick) {
-                  core.info('Orchestrator event does not request kickoff (ready or kickoff label only).');
+                  core.info('Orchestrator assignment does not request kickoff; other orchestrator events do.');
                   return;
                 }
 
@@ -277,6 +289,15 @@ jobs:
                 per_page: 10,
               });
               orchestratorIssue = openOrchestrators.find(i => !i.pull_request) || null;
+
+              if (!orchestratorIssue && eventName !== 'workflow_dispatch') {
+                core.info(`No open orchestrator issue found for ${eventName}; skipping automatic kickoff.`);
+                return;
+              }
+
+              if (orchestratorIssue && !dryRun) {
+                await ensureAssignedToPreferred(orchestratorIssue, preferredAssignee, allowedAssignees);
+              }
             }
 
             const milestoneIssues = await listMilestoneIssues();

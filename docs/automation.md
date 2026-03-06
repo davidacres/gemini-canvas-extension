@@ -92,32 +92,33 @@ Recommended PR convention for phase branches:
   - Executes `lint`, `typecheck`, `test`, `build` scripts when present
 
 - `.github/workflows/kickoff-phase-work.yml`
-  - Starts execution from orchestrator or directly from milestone issue assignment
+  - Starts execution from an open orchestrator issue or directly from milestone issue assignment
   - Triggers:
-    - assign/reopen/label events on orchestrator issue (`plan-orchestrator`)
-      - labeling orchestrator with `state:ready` (or `ready`) requests kickoff
+    - scheduled reconciliation every 15 minutes
+    - push to automation or plan files on `main` / `plan-base`
+    - open/reopen/edit/label events on orchestrator issue (`plan-orchestrator`)
     - assign/label events on milestone issues (`plan-sync` + `milestone:Mx`)
       - labeling a milestone with `state:ready` (or `ready`) requests kickoff
     - manual dispatch (`workflow_dispatch`)
   - Behavior:
+    - auto-assigns the open orchestrator issue to the preferred allowed assignee (default `copilot`)
     - reads open milestone issues and their dependency metadata
     - selects dependency-ready milestones only
     - dependency completion is based on merged `phase/* -> plan-base` PRs, not manual issue closure
     - respects parallel cap (`max_parallel`, default 2)
     - auto-assigns started milestone issues to preferred allowed assignee (first entry in `KICKOFF_ALLOWED_ASSIGNEES`, default `copilot`)
     - creates `phase/Mx-*` branches from `plan-base`
-    - seeds a minimal kickoff commit on new phase branches (to guarantee PR diff)
-    - opens PRs into `plan-base`
+    - comments guidance on the milestone issue instead of opening kickoff-only PRs
   - Notes:
-    - assignment to orchestrator can trigger batched kickoff
-    - marking orchestrator `state:ready` can also trigger batched kickoff
+    - an open orchestrator issue is enough for automatic kickoff and recovery; no manual `Ready` label is required
+    - orchestrator assignment is maintained automatically but does not itself trigger implementation work
     - assignment to a milestone issue prioritizes that specific milestone
     - marking a milestone issue `state:ready` can trigger kickoff and assignment to preferred assignee
     - optional label `ai-start` on a milestone issue can request kickoff without reassignment
     - milestone issue kickoff is gated by assignee allow-list (default: `copilot`)
       - configure repository variable `KICKOFF_ALLOWED_ASSIGNEES` as comma-separated GitHub logins
     - if kickoff is skipped by assignee policy, the workflow comments the reason on the milestone issue
-    - board status column moves alone do not trigger this workflow (use labels/assignment)
+    - scheduled and push-based runs provide self-healing if an issue event is missed
 
 - `.github/workflows/phase-automerge.yml`
   - Enables GitHub auto-merge on `phase/* -> plan-base` PRs (squash)
@@ -128,18 +129,10 @@ Recommended PR convention for phase branches:
   - On merged `phase/* -> plan-base` PR:
     - closes linked milestone issue(s) from PR body (`Closes #...`)
     - dispatches kickoff again for next dependency-ready phases
-  - When all milestone issues are closed:
-    - dispatches `promote-plan-base.yml` to open/update promotion PR to `main`
-
-- `.github/workflows/phase-automerge.yml`
-  - Enables GitHub auto-merge on `phase/* -> plan-base` PRs (squash)
-  - PR merges automatically once required checks pass
-
-- `.github/workflows/execution-controller.yml`
-  - Autonomous progression controller
-  - On merged `phase/* -> plan-base` PR:
-    - closes linked milestone issue(s) from PR body (`Closes #...`)
-    - dispatches kickoff again for next dependency-ready phases
+  - On scheduled or manual reconciliation runs:
+    - scans merged `phase/* -> plan-base` PRs
+    - closes any still-open linked milestone issues that should already be completed
+    - re-dispatches kickoff when milestones remain open
   - Generic issue closure does not advance execution
   - When all milestone issues are closed:
     - dispatches `promote-plan-base.yml` to open/update promotion PR to `main`
@@ -159,7 +152,7 @@ Recommended PR convention for phase branches:
 
 Optional repository variables:
 - `KICKOFF_ALLOWED_ASSIGNEES`
-  - default behavior if unset: only `copilot` assignment triggers milestone auto-kickoff
+  - default behavior if unset: `copilot` is the preferred auto-assignee for orchestrator and started milestone issues
   - format: comma-separated GitHub logins (example: `copilot,github-copilot[bot],davidacres`)
 
 You can enforce these automatically by running:
