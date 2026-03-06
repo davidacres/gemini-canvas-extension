@@ -5,9 +5,6 @@ name: Execution controller
   pull_request_target:
     types:
       - closed
-  issues:
-    types:
-      - closed
 
 permissions:
   contents: write
@@ -110,6 +107,8 @@ jobs:
               } else {
                 core.info('PR event is not a merged phase PR into plan-base; skipping close step (eventName=' + context.eventName + ').');
               }
+            } else {
+              core.info(`Ignoring event ${context.eventName}; execution advances only from merged phase PRs.`);
             }
 
             // 2) Decide next workflow action based on remaining open milestones.

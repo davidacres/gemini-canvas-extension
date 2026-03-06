@@ -102,6 +102,7 @@ Recommended PR convention for phase branches:
   - Behavior:
     - reads open milestone issues and their dependency metadata
     - selects dependency-ready milestones only
+    - dependency completion is based on merged `phase/* -> plan-base` PRs, not manual issue closure
     - respects parallel cap (`max_parallel`, default 2)
     - auto-assigns started milestone issues to preferred allowed assignee (first entry in `KICKOFF_ALLOWED_ASSIGNEES`, default `copilot`)
     - creates `phase/Mx-*` branches from `plan-base`
@@ -139,6 +140,7 @@ Recommended PR convention for phase branches:
   - On merged `phase/* -> plan-base` PR:
     - closes linked milestone issue(s) from PR body (`Closes #...`)
     - dispatches kickoff again for next dependency-ready phases
+  - Generic issue closure does not advance execution
   - When all milestone issues are closed:
     - dispatches `promote-plan-base.yml` to open/update promotion PR to `main`
 
