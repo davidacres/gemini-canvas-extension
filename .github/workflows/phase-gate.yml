@@ -1,0 +1,144 @@
+name: Phase gate
+
+"on":
+  workflow_dispatch:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+      - edited
+      - labeled
+      - unlabeled
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: phase-gate-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  phase-gate:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.base.ref == 'plan-base' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate phase PR readiness
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PLAN_SYNC_TOKEN || github.token }}
+          script: |
+            const pr = context.payload.pull_request;
+
+            if (!pr) {
+              core.info('No pull request in payload (manual run).');
+              return;
+            }
+
+            function firstMilestoneToken(text) {
+              const m = (text || '').match(/\bM(\d+)\b/i);
+              return m ? `M${m[1]}`.toUpperCase() : null;
+            }
+
+            function parseMilestoneFromBranch(name) {
+              // Expected examples:
+              // phase/M3
+              // phase/M3-design-mode
+              // feature/M3-something
+              const m = (name || '').match(/\bM(\d+)\b/i);
+              return m ? `M${m[1]}`.toUpperCase() : null;
+            }
+
+            async function findMilestoneIssue(milestone) {
+              const q = `repo:${context.repo.owner}/${context.repo.repo} is:issue label:plan-sync label:milestone:${milestone}`;
+              const res = await github.rest.search.issuesAndPullRequests({
+                q,
+                per_page: 5,
+              });
+              const issues = (res.data.items || []).filter(i => !i.pull_request);
+              return issues[0] || null;
+            }
+
+            async function getReviews(pullNumber) {
+              const res = await github.rest.pulls.listReviews({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pullNumber,
+                per_page: 100,
+              });
+              return res.data || [];
+            }
+
+            const errors = [];
+
+            if (pr.draft) {
+              errors.push('PR is draft. Mark as ready for review before merge.');
+            }
+
+            const milestone = firstMilestoneToken(pr.title)
+              || parseMilestoneFromBranch(pr.head.ref)
+              || firstMilestoneToken(pr.body);
+
+            if (!milestone) {
+              errors.push('Could not infer milestone (e.g. M3) from PR title/body/branch. Include a token like [M3].');
+            }
+
+            let milestoneIssue = null;
+            if (milestone) {
+              milestoneIssue = await findMilestoneIssue(milestone);
+              if (!milestoneIssue) {
+                errors.push(`No milestone issue found for ${milestone} (expected label milestone:${milestone}).`);
+              }
+            }
+
+            if (milestoneIssue && milestoneIssue.state !== 'closed') {
+              errors.push(`Milestone issue #${milestoneIssue.number} (${milestone}) is not closed.`);
+            }
+
+            const reviews = await getReviews(pr.number);
+            const latestByUser = new Map();
+            for (const r of reviews) {
+              if (!r.user?.login) continue;
+              latestByUser.set(r.user.login, (r.state || '').toUpperCase());
+            }
+
+            const approvedCount = [...latestByUser.values()].filter(s => s === 'APPROVED').length;
+            const changeRequestedCount = [...latestByUser.values()].filter(s => s === 'CHANGES_REQUESTED').length;
+
+            if (approvedCount < 1) {
+              errors.push('At least one APPROVED review is required.');
+            }
+
+            if (changeRequestedCount > 0) {
+              errors.push('There is at least one active CHANGES_REQUESTED review.');
+            }
+
+            const labels = (pr.labels || []).map(l => l.name);
+            if (!labels.includes('ready-to-merge')) {
+              errors.push("Missing 'ready-to-merge' label from PR automation.");
+            }
+
+            if (errors.length) {
+              core.summary
+                .addHeading('Phase gate failed')
+                .addList(errors)
+                .write();
+              core.setFailed(errors.join(' | '));
+              return;
+            }
+
+            const info = [
+              `Milestone: ${milestone}`,
+              `Milestone issue: #${milestoneIssue.number} (closed)`,
+              `Approvals: ${approvedCount}`,
+              'No active change requests',
+              "PR labeled 'ready-to-merge'",
+            ];
+
+            core.summary
+              .addHeading('Phase gate passed')
+              .addList(info)
+              .write();

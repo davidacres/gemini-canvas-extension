@@ -5,8 +5,19 @@ This repository uses GitHub Actions to keep planning, board state, and PR flow a
 ## How work starts
 1. Plan milestones are defined in `gemini-canvas-extension.plan.md`.
 2. `plan-sync.yml` creates or updates one milestone issue per phase (`M0`..`M8`).
-3. Work starts when a milestone issue is moved to `Ready` or assigned.
-4. Board status then updates automatically from issue/PR events.
+3. Create a phase branch from `plan-base` (example: `phase/M3-design-mode`).
+4. Open a PR from phase branch into `plan-base`.
+5. Work starts when the milestone issue is moved to `Ready` or assigned.
+6. Board status then updates automatically from issue/PR events.
+
+## Branch strategy
+- `main`: stable integration branch
+- `plan-base`: gated branch for milestone completion merges
+- `phase/*`: implementation branches for each milestone/phase
+
+Recommended PR convention for phase branches:
+- PR title includes milestone token (example: `[M3] Design mode`)
+- PR body references issue (example: `Closes #4`)
 
 ## Workflows
 - `.github/workflows/plan-sync.yml`
@@ -41,6 +52,16 @@ This repository uses GitHub Actions to keep planning, board state, and PR flow a
   - Optional reviewer assignment:
     - Set repository variable `AUTO_REVIEWERS` to comma-separated GitHub usernames
 
+- `.github/workflows/phase-gate.yml`
+  - Enforces merge readiness for PRs targeting `plan-base`
+  - Gate checks:
+    - PR is not draft
+    - milestone token present (`M0`..`M8`) in title/body/branch
+    - corresponding milestone issue exists and is closed
+    - at least one `APPROVED` review
+    - no active `CHANGES_REQUESTED`
+    - PR has `ready-to-merge` label
+
 - `.github/workflows/weekly-status-report.yml`
   - Weekly summary issue for milestone progress
 
@@ -48,6 +69,12 @@ This repository uses GitHub Actions to keep planning, board state, and PR flow a
 - Branch protection on `main` should require:
   - Pull request before merge
   - Required checks
+  - Required approvals
+- Branch protection on `plan-base` should require:
+  - Pull request before merge
+  - Required checks:
+    - `Phase gate / phase-gate`
+    - your CI/test checks
   - Required approvals
 - Optional: CODEOWNERS for deterministic reviewer routing
 
