@@ -1,0 +1,128 @@
+name: Execution controller
+
+"on":
+  workflow_dispatch:
+  pull_request_target:
+    types:
+      - closed
+  issues:
+    types:
+      - closed
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+  pull-requests: read
+
+concurrency:
+  group: execution-controller
+  cancel-in-progress: false
+
+jobs:
+  advance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close completed phase issues and advance plan
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PLAN_SYNC_TOKEN || github.token }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const KICKOFF_WORKFLOW = 'kickoff-phase-work.yml';
+            const PROMOTE_WORKFLOW = 'promote-plan-base.yml';
+            const MAX_PARALLEL = Number.parseInt(process.env.MAX_PARALLEL_PHASES || '2', 10) || 2;
+
+            function parseLinkedIssueNumbers(text) {
+              const out = new Set();
+              const re = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/ig;
+              let m;
+              while ((m = re.exec(text || '')) !== null) out.add(Number(m[1]));
+              return [...out].filter(n => Number.isInteger(n) && n > 0);
+            }
+
+            async function getIssue(issueNumber) {
+              try {
+                const r = await github.rest.issues.get({ owner, repo, issue_number: issueNumber });
+                if (r.data.pull_request) return null;
+                return r.data;
+              } catch {
+                return null;
+              }
+            }
+
+            function hasMilestoneLabel(issue) {
+              const labels = (issue?.labels || []).map(l => (typeof l === 'string' ? l : l?.name));
+              return labels.some(l => /^milestone:M\d+$/i.test(l || ''));
+            }
+
+            async function closeIssue(issueNumber, reason) {
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: issueNumber,
+                state: 'closed',
+                state_reason: 'completed',
+              });
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: issueNumber,
+                body: `Auto-closed by execution controller: ${reason}`,
+              });
+            }
+
+            async function listOpenMilestones() {
+              const issues = await github.paginate(github.rest.issues.listForRepo, {
+                owner,
+                repo,
+                state: 'open',
+                labels: 'plan-sync',
+                per_page: 100,
+              });
+              return issues.filter(i => !i.pull_request && hasMilestoneLabel(i));
+            }
+
+            async function dispatchWorkflow(workflowId, ref, inputs) {
+              await github.rest.actions.createWorkflowDispatch({
+                owner,
+                repo,
+                workflow_id: workflowId,
+                ref,
+                inputs,
+              });
+            }
+
+            // 1) If a phase PR merged into plan-base, close linked milestone issues.
+            if (context.eventName === 'pull_request') {
+              const pr = context.payload.pull_request;
+              if (pr?.merged && pr.base?.ref === 'plan-base' && String(pr.head?.ref || '').startsWith('phase/')) {
+                const linked = parseLinkedIssueNumbers(`${pr.title || ''}\n${pr.body || ''}`);
+                for (const n of linked) {
+                  const issue = await getIssue(n);
+                  if (!issue) continue;
+                  if (!hasMilestoneLabel(issue)) continue;
+                  if ((issue.state || '').toLowerCase() !== 'closed') {
+                    await closeIssue(n, `merged phase PR #${pr.number}`);
+                  }
+                }
+              } else {
+                core.info('PR event is not a merged phase PR into plan-base; skipping close step.');
+              }
+            }
+
+            // 2) Decide next workflow action based on remaining open milestones.
+            const openMilestones = await listOpenMilestones();
+            if (openMilestones.length > 0) {
+              await dispatchWorkflow(KICKOFF_WORKFLOW, 'plan-base', {
+                max_parallel: String(MAX_PARALLEL),
+                dry_run: 'false',
+              });
+              core.info(`Dispatched kickoff workflow. Open milestone count: ${openMilestones.length}`);
+              return;
+            }
+
+            // 3) If no milestones left, trigger promotion plan-base -> main.
+            await dispatchWorkflow(PROMOTE_WORKFLOW, 'main', {});
+            core.info('All milestones closed; dispatched promotion workflow.');

@@ -204,7 +204,7 @@ jobs:
               return prs[0] || null;
             }
 
-            async function createDraftPrForIssue(issue, milestone, headRef, orchestratorIssue) {
+            async function createPrForIssue(issue, milestone, headRef, orchestratorIssue) {
               const title = `[${milestone}] ${issue.title.replace(/^\[[^\]]+\]\s*/, '')}`;
               const body = [
                 `Closes #${issue.number}`,
@@ -220,7 +220,7 @@ jobs:
                 base: BASE_BRANCH,
                 title,
                 body,
-                draft: true,
+                draft: false,
               });
               return created.data;
             }
@@ -328,7 +328,7 @@ jobs:
                 }
                 let pr = await findOpenPrByHead(headRef);
                 if (!pr && !dryRun) {
-                  pr = await createDraftPrForIssue(issue, milestone, headRef, orchestratorIssue);
+                  pr = await createPrForIssue(issue, milestone, headRef, orchestratorIssue);
                 }
 
                 const prRef = pr ? `#${pr.number}` : '(dry-run)';
