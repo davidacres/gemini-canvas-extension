@@ -53,14 +53,12 @@ Recommended PR convention for phase branches:
     - Set repository variable `AUTO_REVIEWERS` to comma-separated GitHub usernames
 
 - `.github/workflows/phase-gate.yml`
-  - Enforces merge readiness for PRs targeting `plan-base`
+  - Enforces merge readiness only for PRs from `phase/*` into `plan-base`
   - Gate checks:
     - PR is not draft
     - milestone token present (`M0`..`M8`) in title/body/branch
     - corresponding milestone issue exists and is closed
-    - at least one `APPROVED` review
-    - no active `CHANGES_REQUESTED`
-    - PR has `ready-to-merge` label
+  - Approval/label gate is disabled for single-maintainer mode
 
 - `.github/workflows/weekly-status-report.yml`
   - Weekly summary issue for milestone progress
@@ -69,13 +67,11 @@ Recommended PR convention for phase branches:
 - Branch protection on `main` should require:
   - Pull request before merge
   - Required checks
-  - Required approvals
+  - Approvals optional (currently 0 required)
 - Branch protection on `plan-base` should require:
   - Pull request before merge
-  - Required checks:
-    - `Phase gate / phase-gate`
-    - your CI/test checks
-  - Required approvals
+  - Required checks optional (currently none required in single-maintainer mode)
+  - Approvals optional (currently 0 required)
 - Optional: CODEOWNERS for deterministic reviewer routing
 
 You can enforce these automatically by running:
