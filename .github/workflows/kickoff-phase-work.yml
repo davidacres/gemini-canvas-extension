@@ -103,6 +103,24 @@ jobs:
               return prs.filter(pr => String(pr.head?.ref || '').startsWith('phase/'));
             }
 
+            async function listMergedPhasePrs() {
+              const prs = await github.paginate(github.rest.pulls.list, {
+                owner,
+                repo,
+                state: 'closed',
+                base: BASE_BRANCH,
+                per_page: 100,
+              });
+              return prs.filter(pr => pr.merged_at && String(pr.head?.ref || '').startsWith('phase/'));
+            }
+
+            function milestoneFromPr(pr) {
+              const fromTitle = (String(pr?.title || '').match(/\bM\d+\b/i) || [null])[0];
+              if (fromTitle) return String(fromTitle).toUpperCase();
+              const fromBranch = (String(pr?.head?.ref || '').match(/\bM\d+\b/i) || [null])[0];
+              return fromBranch ? String(fromBranch).toUpperCase() : null;
+            }
+
             async function getBaseRefSha() {
               const ref = await github.rest.git.getRef({ owner, repo, ref: `heads/${BASE_BRANCH}` });
               return ref.data.object.sha;
@@ -271,11 +289,17 @@ jobs:
             }
 
             const openPhasePrs = await listOpenPhasePrs();
+            const mergedPhasePrs = await listMergedPhasePrs();
             const openMilestones = new Set(
               openPhasePrs
                 .map(pr => (String(pr.title || '').match(/\bM\d+\b/i) || [null])[0])
                 .filter(Boolean)
                 .map(s => String(s).toUpperCase())
+            );
+            const completedMilestones = new Set(
+              mergedPhasePrs
+                .map(pr => milestoneFromPr(pr))
+                .filter(Boolean)
             );
 
             const availableSlots = Math.max(0, maxParallel - openPhasePrs.length);
@@ -288,13 +312,10 @@ jobs:
               .map(i => {
                 const milestone = milestoneFromLabels(i);
                 const deps = depsFromBody(i);
-                const blockedByOpenDep = deps.some(dep => {
-                  const depIssue = byMilestone.get(dep);
-                  return depIssue && String(depIssue.state || '').toLowerCase() !== 'closed';
-                });
-                return { issue: i, milestone, deps, blockedByOpenDep };
+                const blockedByUnmergedDep = deps.some(dep => !completedMilestones.has(dep));
+                return { issue: i, milestone, deps, blockedByUnmergedDep };
               })
-              .filter(x => x.milestone && !x.blockedByOpenDep && !openMilestones.has(x.milestone))
+              .filter(x => x.milestone && !x.blockedByUnmergedDep && !openMilestones.has(x.milestone))
               .sort((a, b) => {
                 const na = Number((a.milestone.match(/\d+/) || [999])[0]);
                 const nb = Number((b.milestone.match(/\d+/) || [999])[0]);
