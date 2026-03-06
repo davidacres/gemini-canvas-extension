@@ -108,7 +108,7 @@ jobs:
                   }
                 }
               } else {
-                core.info('PR event is not a merged phase PR into plan-base; skipping close step.');
+                core.info('PR event is not a merged phase PR into plan-base; skipping close step (eventName=' + context.eventName + ').');
               }
             }
 
