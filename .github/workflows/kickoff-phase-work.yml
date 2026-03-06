@@ -10,7 +10,7 @@ name: Kickoff phase work
       - .github/workflows/execution-controller.yml
       - gemini-canvas-extension.plan.md
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
       max_parallel:
@@ -225,8 +225,8 @@ jobs:
               const isReadyLabelEvent = action === 'labeled' && READY_LABELS.has(eventLabel);
 
               if (isOrchestrator) {
-                // Kick only from explicit orchestration signals. Assignment is ignored so Copilot
-                // does not start implementation work from the parent orchestration issue.
+                // Kickoff on orchestrator issue events except assignment. Assignment is ignored so Copilot
+                // does not start implementation work solely from adding an assignee to the parent orchestration issue.
                 const shouldKick = action !== 'assigned';
                 if (!shouldKick) {
                   core.info('Orchestrator assignment does not request kickoff; other orchestrator events do.');
