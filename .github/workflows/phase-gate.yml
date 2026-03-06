@@ -62,6 +62,12 @@ jobs:
               return issues[0] || null;
             }
 
+            function linksIssueForClosure(prText, issueNumber) {
+              if (!issueNumber) return false;
+              const re = new RegExp(`(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+#${issueNumber}\\b`, 'i');
+              return re.test(prText || '');
+            }
+
             const errors = [];
 
             if (pr.draft) {
@@ -84,8 +90,9 @@ jobs:
               }
             }
 
-            if (milestoneIssue && milestoneIssue.state !== 'closed') {
-              errors.push(`Milestone issue #${milestoneIssue.number} (${milestone}) is not closed.`);
+            const prText = `${pr.title || ''}\n${pr.body || ''}`;
+            if (milestoneIssue && !linksIssueForClosure(prText, milestoneIssue.number)) {
+              errors.push(`PR must include a closing reference to milestone issue #${milestoneIssue.number} (e.g. \`Closes #${milestoneIssue.number}\`).`);
             }
 
             if (errors.length) {
@@ -99,7 +106,7 @@ jobs:
 
             const info = [
               `Milestone: ${milestone}`,
-              `Milestone issue: #${milestoneIssue.number} (closed)`,
+              `Milestone issue: #${milestoneIssue.number} (linked for closure)`,
               'Approval/label gate disabled for single-maintainer workflow',
             ];
 
