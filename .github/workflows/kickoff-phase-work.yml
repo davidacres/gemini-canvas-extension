@@ -127,6 +127,49 @@ jobs:
               });
             }
 
+            async function ensureSeedCommit(refName, milestone, issueNumber) {
+              // If there are no commits ahead of base, PR creation fails. Seed with a small kickoff file.
+              const cmp = await github.rest.repos.compareCommits({
+                owner,
+                repo,
+                basehead: `${BASE_BRANCH}...${refName}`,
+              });
+              if ((cmp.data.total_commits || 0) > 0) return;
+
+              const path = `.phase-kickoff/${milestone}.md`;
+              let existingSha = null;
+              let content = [
+                `# ${milestone} kickoff`,
+                '',
+                `Created by kickoff workflow from issue #${issueNumber}.`,
+                '',
+                `Timestamp: ${new Date().toISOString()}`,
+              ].join('\n');
+
+              try {
+                const existing = await github.rest.repos.getContent({
+                  owner,
+                  repo,
+                  path,
+                  ref: refName,
+                });
+                if (!Array.isArray(existing.data) && existing.data.sha) {
+                  existingSha = existing.data.sha;
+                }
+              } catch (e) {
+                if (e?.status !== 404) throw e;
+              }
+
+              await github.rest.repos.createOrUpdateFileContents({
+                owner,
+                repo,
+                path,
+                branch: refName,
+                message: `chore(${milestone}): seed kickoff branch`,
+                content: Buffer.from(content, 'utf8').toString('base64'),
+                ...(existingSha ? { sha: existingSha } : {}),
+              });
+            }
             async function findOpenPrByHead(headRef) {
               const prs = await github.paginate(github.rest.pulls.list, {
                 owner,
@@ -256,6 +299,9 @@ jobs:
                   await createBranch(headRef, baseSha);
                 }
 
+                if (!dryRun) {
+                  await ensureSeedCommit(headRef, milestone, issue.number);
+                }
                 let pr = await findOpenPrByHead(headRef);
                 if (!pr && !dryRun) {
                   pr = await createDraftPrForIssue(issue, milestone, headRef, orchestratorIssue);

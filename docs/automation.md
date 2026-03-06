@@ -89,6 +89,7 @@ Recommended PR convention for phase branches:
     - selects dependency-ready milestones only
     - respects parallel cap (`max_parallel`, default 2)
     - creates `phase/Mx-*` branches from `plan-base`
+    - seeds a minimal kickoff commit on new phase branches (to guarantee PR diff)
     - opens draft PRs into `plan-base`
   - Notes:
     - assignment to orchestrator can trigger kickoff
