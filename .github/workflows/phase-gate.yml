@@ -74,8 +74,8 @@ jobs:
 
             const errors = [];
 
-            if (!String(pr.head?.ref || '').startsWith('phase/')) {
-              errors.push(`PR head branch must match phase/*, got '${pr.head?.ref || 'unknown'}'.`);
+            if (!/^phase\/[^/]+$/.test(String(pr.head?.ref || ''))) {
+              errors.push(`PR head branch must match phase/* (single path segment after "phase/"), got '${pr.head?.ref || 'unknown'}'.`);
             }
 
             if (pr.draft) {
