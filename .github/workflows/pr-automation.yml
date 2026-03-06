@@ -1,0 +1,179 @@
+name: PR automation
+
+"on":
+  workflow_dispatch:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+      - converted_to_draft
+      - labeled
+      - unlabeled
+      - closed
+  pull_request_review:
+    types:
+      - submitted
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pr-automation-${{ github.event.pull_request.number || github.event.review.pull_request_url || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  automate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply PR labels, reviewers, and optional auto-merge
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PLAN_SYNC_TOKEN || github.token }}
+          script: |
+            const eventName = context.eventName;
+            const action = context.payload.action;
+
+            function parseReviewers(raw) {
+              if (!raw) return [];
+              return raw
+                .split(',')
+                .map(s => s.trim())
+                .filter(Boolean);
+            }
+
+            function getPrFromPayload() {
+              if (context.payload.pull_request) return context.payload.pull_request;
+              if (context.payload.review?.pull_request_url) return null;
+              return null;
+            }
+
+            async function getPrFromReviewPayload() {
+              const review = context.payload.review;
+              if (!review?.pull_request_url) return null;
+              const number = Number(review.pull_request_url.split('/').pop());
+              if (!Number.isInteger(number)) return null;
+              const res = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: number,
+              });
+              return res.data;
+            }
+
+            async function ensureLabels(labelNames) {
+              for (const name of labelNames) {
+                try {
+                  await github.rest.issues.createLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    name,
+                    color: '1d76db',
+                    description: 'Managed by PR automation',
+                  });
+                } catch (e) {
+                  if (e?.status !== 422) throw e;
+                }
+              }
+            }
+
+            async function replaceWorkflowLabels(issueNumber, addLabel) {
+              const res = await github.rest.issues.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+              });
+
+              const existing = (res.data.labels || [])
+                .map(l => (typeof l === 'string' ? l : l?.name))
+                .filter(Boolean)
+                .filter(name => !['wip', 'needs-review', 'ready-to-merge'].includes(name));
+
+              const labels = [...new Set([...existing, addLabel])];
+              await github.rest.issues.setLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                labels,
+              });
+            }
+
+            async function maybeRequestReviewers(pr, reviewers) {
+              if (!reviewers.length) return;
+              const existing = (pr.requested_reviewers || []).map(u => u.login);
+              const toRequest = reviewers.filter(r => !existing.includes(r));
+              if (!toRequest.length) return;
+
+              try {
+                await github.rest.pulls.requestReviewers({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: pr.number,
+                  reviewers: toRequest,
+                });
+              } catch (e) {
+                core.warning(`Could not request reviewers: ${e.message || e}`);
+              }
+            }
+
+            async function maybeEnableAutoMerge(pr) {
+              const res = await github.rest.issues.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+              });
+              const labels = (res.data.labels || []).map(l => (typeof l === 'string' ? l : l?.name));
+              if (!labels.includes('automerge')) return;
+              if (pr.state !== 'open') return;
+
+              const mutation = `mutation($pullRequestId:ID!) {
+                enablePullRequestAutoMerge(input:{ pullRequestId:$pullRequestId, mergeMethod:SQUASH }) {
+                  pullRequest { number }
+                }
+              }`;
+
+              try {
+                await github.graphql(mutation, { pullRequestId: pr.node_id });
+              } catch (e) {
+                core.warning(`Could not enable auto-merge: ${e.message || e}`);
+              }
+            }
+
+            let pr = getPrFromPayload();
+            if (!pr && eventName === 'pull_request_review') {
+              pr = await getPrFromReviewPayload();
+            }
+            if (!pr?.number) {
+              core.info('No pull request in payload.');
+              return;
+            }
+
+            await ensureLabels(['wip', 'needs-review', 'ready-to-merge', 'automerge']);
+
+            const configuredReviewers = parseReviewers(process.env.AUTO_REVIEWERS || '');
+
+            if (eventName === 'pull_request_target') {
+              const isDraft = !!pr.draft;
+              if (action === 'opened' || action === 'reopened' || action === 'ready_for_review' || action === 'converted_to_draft' || action === 'synchronize') {
+                await replaceWorkflowLabels(pr.number, isDraft ? 'wip' : 'needs-review');
+                if (!isDraft) {
+                  await maybeRequestReviewers(pr, configuredReviewers);
+                }
+                await maybeEnableAutoMerge(pr);
+              }
+
+              if (action === 'closed' && pr.merged) {
+                await replaceWorkflowLabels(pr.number, 'ready-to-merge');
+              }
+            }
+
+            if (eventName === 'pull_request_review') {
+              const state = (context.payload.review?.state || '').toLowerCase();
+              if (state === 'approved') {
+                await replaceWorkflowLabels(pr.number, 'ready-to-merge');
+                await maybeEnableAutoMerge(pr);
+              }
+            }

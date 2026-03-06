@@ -1,0 +1,339 @@
+name: Board automation
+
+"on":
+  workflow_dispatch:
+  issues:
+    types:
+      - opened
+      - reopened
+      - closed
+      - labeled
+      - unlabeled
+      - assigned
+      - unassigned
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - ready_for_review
+      - converted_to_draft
+      - closed
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: board-automation-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  sync-board-status:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync Project status from issue/PR activity
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PLAN_SYNC_TOKEN || github.token }}
+          script: |
+            const CONFIG = {
+              ownerType: 'user',
+              ownerLogin: 'davidacres',
+              projectNumber: 4,
+              statusFieldName: 'Status',
+              status: {
+                backlog: 'Backlog',
+                ready: 'Ready',
+                inProgress: 'In Progress',
+                inReview: 'In Review',
+                done: 'Done',
+              },
+              // Optional workflow labels to drive board state directly.
+              labelToStatus: {
+                'state:ready': 'Ready',
+                'state:in-progress': 'In Progress',
+                'state:in-review': 'In Review',
+                'state:done': 'Done',
+              },
+            };
+
+            function lower(s) {
+              return (s || '').toLowerCase();
+            }
+
+            function parseLinkedIssueNumbersFromPr(pr) {
+              const text = `${pr?.title || ''}\n${pr?.body || ''}`;
+              const set = new Set();
+
+              const closeRegex = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/ig;
+              let m;
+              while ((m = closeRegex.exec(text)) !== null) {
+                set.add(Number(m[1]));
+              }
+
+              const refsRegex = /(?:refs?|related to)\s+#(\d+)/ig;
+              while ((m = refsRegex.exec(text)) !== null) {
+                set.add(Number(m[1]));
+              }
+
+              return [...set].filter(n => Number.isInteger(n) && n > 0);
+            }
+
+            async function getProject() {
+              const query = CONFIG.ownerType === 'org'
+                ? `query($login:String!, $number:Int!) {
+                    organization(login:$login) {
+                      projectV2(number:$number) {
+                        id
+                        fields(first:50) {
+                          nodes {
+                            __typename
+                            ... on ProjectV2SingleSelectField {
+                              id
+                              name
+                              options { id name }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }`
+                : `query($login:String!, $number:Int!) {
+                    user(login:$login) {
+                      projectV2(number:$number) {
+                        id
+                        fields(first:50) {
+                          nodes {
+                            __typename
+                            ... on ProjectV2SingleSelectField {
+                              id
+                              name
+                              options { id name }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }`;
+
+              const resp = await github.graphql(query, {
+                login: CONFIG.ownerLogin,
+                number: CONFIG.projectNumber,
+              });
+
+              const node = CONFIG.ownerType === 'org' ? resp.organization : resp.user;
+              return node?.projectV2 || null;
+            }
+
+            function findStatusField(project) {
+              return (project?.fields?.nodes || []).find(
+                f => f.__typename === 'ProjectV2SingleSelectField' && f.name === CONFIG.statusFieldName,
+              ) || null;
+            }
+
+            function findStatusOptionId(statusField, name) {
+              const option = (statusField?.options || []).find(
+                o => lower(o.name) === lower(name),
+              );
+              return option?.id || null;
+            }
+
+            async function getIssueByNumber(number) {
+              try {
+                const res = await github.rest.issues.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: number,
+                });
+                if (res.data.pull_request) return null;
+                return res.data;
+              } catch {
+                return null;
+              }
+            }
+
+            async function getProjectItemForIssue(projectId, issueNodeId) {
+              let cursor = null;
+              while (true) {
+                const query = `query($projectId:ID!, $cursor:String) {
+                  node(id:$projectId) {
+                    ... on ProjectV2 {
+                      items(first:100, after:$cursor) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes {
+                          id
+                          content {
+                            __typename
+                            ... on Issue { id number }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }`;
+
+                const resp = await github.graphql(query, { projectId, cursor });
+                const page = resp?.node?.items;
+                if (!page?.nodes) break;
+
+                const match = page.nodes.find(
+                  n => n?.content?.__typename === 'Issue' && n?.content?.id === issueNodeId,
+                );
+                if (match) return match.id;
+
+                if (!page.pageInfo?.hasNextPage) break;
+                cursor = page.pageInfo.endCursor;
+              }
+              return null;
+            }
+
+            async function addIssueToProject(projectId, issueNodeId) {
+              const mutation = `mutation($projectId:ID!, $contentId:ID!) {
+                addProjectV2ItemById(input:{ projectId:$projectId, contentId:$contentId }) {
+                  item { id }
+                }
+              }`;
+              const resp = await github.graphql(mutation, {
+                projectId,
+                contentId: issueNodeId,
+              });
+              return resp?.addProjectV2ItemById?.item?.id || null;
+            }
+
+            async function setStatus(projectId, itemId, fieldId, optionId) {
+              const mutation = `mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!) {
+                updateProjectV2ItemFieldValue(input:{
+                  projectId:$projectId,
+                  itemId:$itemId,
+                  fieldId:$fieldId,
+                  value:{ singleSelectOptionId:$optionId }
+                }) {
+                  projectV2Item { id }
+                }
+              }`;
+
+              await github.graphql(mutation, {
+                projectId,
+                itemId,
+                fieldId,
+                optionId,
+              });
+            }
+
+            function issueLabelStatus(issue) {
+              const labels = (issue?.labels || []).map(l => (typeof l === 'string' ? l : l?.name)).filter(Boolean);
+              for (const name of labels) {
+                const mapped = CONFIG.labelToStatus[lower(name)];
+                if (mapped) return mapped;
+              }
+              return null;
+            }
+
+            function computeDesiredStatus({ issue, eventName, action, pr }) {
+              if (!issue) return null;
+
+              if (lower(issue.state) === 'closed') return CONFIG.status.done;
+
+              if (eventName === 'issues') {
+                if (action === 'assigned' && (issue.assignees || []).length > 0) {
+                  return CONFIG.status.inProgress;
+                }
+                if (action === 'unassigned' && (issue.assignees || []).length === 0) {
+                  return CONFIG.status.backlog;
+                }
+              }
+
+              if (eventName === 'pull_request') {
+                if (action === 'ready_for_review') return CONFIG.status.inReview;
+                if (action === 'converted_to_draft') return CONFIG.status.inProgress;
+                if (action === 'opened' || action === 'reopened') {
+                  return pr?.draft ? CONFIG.status.inProgress : CONFIG.status.inReview;
+                }
+                if (action === 'closed') {
+                  return pr?.merged ? CONFIG.status.done : CONFIG.status.inProgress;
+                }
+              }
+
+              const byLabel = issueLabelStatus(issue);
+              if (byLabel) return byLabel;
+
+              return null;
+            }
+
+            const eventName = context.eventName;
+            const action = context.payload.action;
+            const issueNumbers = new Set();
+
+            if (eventName === 'issues' && context.payload.issue?.number) {
+              issueNumbers.add(context.payload.issue.number);
+            }
+
+            if (eventName === 'pull_request') {
+              const pr = context.payload.pull_request;
+              for (const n of parseLinkedIssueNumbersFromPr(pr)) issueNumbers.add(n);
+            }
+
+            if (issueNumbers.size === 0) {
+              core.info('No target issues detected for this event.');
+              return;
+            }
+
+            let project;
+            try {
+              project = await getProject();
+            } catch (e) {
+              core.warning(`Skipping board automation; cannot access project: ${e.message || e}`);
+              return;
+            }
+
+            if (!project?.id) {
+              core.warning('Skipping board automation; project not found.');
+              return;
+            }
+
+            const statusField = findStatusField(project);
+            if (!statusField?.id) {
+              core.warning('Skipping board automation; Status field not found.');
+              return;
+            }
+
+            const results = [];
+            const pr = context.payload.pull_request;
+            for (const issueNumber of issueNumbers) {
+              const issue = await getIssueByNumber(issueNumber);
+              if (!issue?.node_id) {
+                results.push(`ignored #${issueNumber} (not found or not an issue)`);
+                continue;
+              }
+
+              const desiredStatusName = computeDesiredStatus({ issue, eventName, action, pr });
+              if (!desiredStatusName) {
+                results.push(`ignored #${issueNumber} (no status change needed)`);
+                continue;
+              }
+
+              const optionId = findStatusOptionId(statusField, desiredStatusName);
+              if (!optionId) {
+                results.push(`ignored #${issueNumber} (status option '${desiredStatusName}' missing)`);
+                continue;
+              }
+
+              let itemId = await getProjectItemForIssue(project.id, issue.node_id);
+              if (!itemId) {
+                itemId = await addIssueToProject(project.id, issue.node_id);
+              }
+
+              if (!itemId) {
+                results.push(`failed #${issueNumber} (could not create/find project item)`);
+                continue;
+              }
+
+              await setStatus(project.id, itemId, statusField.id, optionId);
+              results.push(`updated #${issueNumber} -> ${desiredStatusName}`);
+            }
+
+            core.summary
+              .addHeading('Board automation results')
+              .addList(results)
+              .write();

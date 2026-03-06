@@ -6,6 +6,16 @@ name: Sync plan milestones to GitHub issues
     paths:
       - gemini-canvas-extension.plan.md
       - .github/workflows/plan-sync.yml
+  issues:
+    types:
+      - opened
+      - edited
+      - reopened
+      - closed
+      - labeled
+      - unlabeled
+  schedule:
+    - cron: "17 * * * *"
 
 permissions:
   contents: read
