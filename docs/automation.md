@@ -63,6 +63,11 @@ Recommended PR convention for phase branches:
 - `.github/workflows/weekly-status-report.yml`
   - Weekly summary issue for milestone progress
 
+- `.github/workflows/ci.yml`
+  - Baseline CI for implementation branches and PRs
+  - Runs on `main`, `plan-base`, and working branches (`phase/*`, `chore/*`)
+  - Executes `lint`, `typecheck`, `test`, `build` scripts when present
+
 ## Required repository settings
 - Branch protection on `main` should require:
   - Pull request before merge
