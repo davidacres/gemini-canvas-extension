@@ -1,0 +1,11 @@
+.vscode/**
+.vscode-test/**
+src/**
+node_modules/**
+.eslintrc.json
+.prettierrc
+.prettierignore
+tsconfig.json
+vitest.config.ts
+*.map
+coverage/**
