@@ -51,6 +51,17 @@ Recommended PR convention for phase branches:
     - PR draft or converted_to_draft -> `In Progress`
     - Merged PR -> `Done`
 
+- `.github/workflows/project-status-label-sync.yml`
+  - Mirrors Project v2 `Status` field back to issue labels (`state:*`)
+  - Trigger: `projects_v2_item` changes (for project item edits)
+  - Status mapping:
+    - `Backlog` -> `state:backlog`
+    - `Ready` -> `state:ready`
+    - `In Progress` -> `state:in-progress`
+    - `In Review` -> `state:in-review`
+    - `Done` -> `state:done`
+  - This enables board column moves (for example to `Ready`) to create label events that kickoff automation can consume.
+
 - `.github/workflows/pr-automation.yml`
   - PR labels/reviewers/auto-merge helper
   - For `phase/* -> plan-base` PRs, auto-converts draft to ready-for-review when non-kickoff files are detected

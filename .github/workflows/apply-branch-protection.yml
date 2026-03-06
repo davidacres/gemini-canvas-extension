@@ -1,4 +1,5 @@
 name: Apply branch protection
+# No-op metadata line to allow push-triggered reapplication when needed.
 
 "on":
   workflow_dispatch:

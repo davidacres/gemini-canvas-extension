@@ -435,10 +435,10 @@ jobs:
               const headRef = `phase/${milestone}-${suffix}`;
 
               try {
+
                 if (!dryRun) {
                   await ensureAssignedToPreferred(issue, preferredAssignee, allowedAssignees);
                 }
-
                 const exists = await branchExists(headRef);
                 let createdNow = false;
                 if (!exists && !dryRun) {
