@@ -335,7 +335,7 @@ jobs:
                 results.push(`started ${milestone} -> ${headRef} ${prRef}`);
 
                 if (!dryRun) {
-                  await addComment(issue.number, `Kickoff created draft PR ${pr.html_url} from branch \`${headRef}\`.`);
+                  await addComment(issue.number, `Kickoff created PR ${pr.html_url} from branch \`${headRef}\`.`);
                 }
               } catch (e) {
                 results.push(`failed ${milestone}: ${e.message || e}`);
