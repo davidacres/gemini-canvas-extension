@@ -220,6 +220,10 @@ jobs:
                   core.info('Orchestrator event does not request kickoff (ready or kickoff label only).');
                   return;
                 }
+
+                if (!dryRun) {
+                  await ensureAssignedToPreferred(issue, preferredAssignee, allowedAssignees);
+                }
                 orchestratorIssue = issue;
               } else if (isMilestone) {
                 // Allow direct task kickoff by assigning a milestone issue.
