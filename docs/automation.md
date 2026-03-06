@@ -102,22 +102,26 @@ Recommended PR convention for phase branches:
       - labeling a milestone with `state:ready` (or `ready`) requests kickoff
     - manual dispatch (`workflow_dispatch`)
   - Behavior:
-    - auto-assigns the open orchestrator issue to the preferred allowed assignee (default `copilot`)
+    - verifies whether the preferred assignee is assignable through the repository issues API before claiming assignment
+    - preserves an existing manual Copilot assignment on the orchestrator issue when present
     - reads open milestone issues and their dependency metadata
     - selects dependency-ready milestones only
     - dependency completion is based on merged `phase/* -> plan-base` PRs, not manual issue closure
     - respects parallel cap (`max_parallel`, default 2)
-    - auto-assigns started milestone issues to preferred allowed assignee (first entry in `KICKOFF_ALLOWED_ASSIGNEES`, default `copilot`)
+    - treats existing `phase/*` branches as active work, so scheduled recovery does not re-prepare the same milestone repeatedly
+    - attempts to assign started milestone issues to the preferred allowed assignee when GitHub reports that assignee as API-assignable
+    - marks started milestone issues as `state:in-progress` even when the preferred assignee is not API-assignable
     - creates `phase/Mx-*` branches from `plan-base`
     - comments guidance on the milestone issue instead of opening kickoff-only PRs
   - Notes:
     - an open orchestrator issue is enough for automatic kickoff and recovery; no manual `Ready` label is required
-    - orchestrator assignment is maintained automatically but does not itself trigger implementation work
+    - orchestrator assignment does not itself trigger implementation work
     - assignment to a milestone issue prioritizes that specific milestone
     - marking a milestone issue `state:ready` can trigger kickoff and assignment to preferred assignee
     - optional label `ai-start` on a milestone issue can request kickoff without reassignment
     - milestone issue kickoff is gated by assignee allow-list (default: `copilot`)
       - configure repository variable `KICKOFF_ALLOWED_ASSIGNEES` as comma-separated GitHub logins
+    - if the preferred assignee is not assignable via the repository issues API, the workflow records progress with `state:in-progress` and branch preparation instead of logging a false assignment success
     - if kickoff is skipped by assignee policy, the workflow comments the reason on the milestone issue
     - scheduled and push-based runs provide self-healing if an issue event is missed
 
@@ -165,7 +169,7 @@ Recommended PR convention for phase branches:
 
 Optional repository variables:
 - `KICKOFF_ALLOWED_ASSIGNEES`
-  - default behavior if unset: `copilot` is the preferred auto-assignee for orchestrator and started milestone issues
+  - default behavior if unset: `copilot` is the preferred assignee name for orchestration, but assignment is only recorded when GitHub exposes that login as assignable through the issues API
   - format: comma-separated GitHub logins (example: `copilot,github-copilot[bot],davidacres`)
 
 You can enforce these automatically by running:

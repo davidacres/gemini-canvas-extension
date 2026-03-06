@@ -155,9 +155,36 @@ jobs:
               return fromBranch ? String(fromBranch).toUpperCase() : null;
             }
 
+            function milestoneFromBranchName(name) {
+              const token = (String(name || '').match(/\bM\d+\b/i) || [null])[0];
+              return token ? String(token).toUpperCase() : null;
+            }
+
             async function getBaseRefSha() {
               const ref = await github.rest.git.getRef({ owner, repo, ref: `heads/${BASE_BRANCH}` });
               return ref.data.object.sha;
+            }
+
+            async function listPhaseBranches() {
+              const branches = await github.paginate(github.rest.repos.listBranches, {
+                owner,
+                repo,
+                per_page: 100,
+              });
+              return branches.filter(branch => String(branch.name || '').startsWith('phase/'));
+            }
+
+            async function listAssignableAssignees() {
+              const assignees = await github.paginate(github.rest.issues.listAssignees, {
+                owner,
+                repo,
+                per_page: 100,
+              });
+              return new Set(
+                assignees
+                  .map(assignee => String(assignee?.login || '').toLowerCase())
+                  .filter(Boolean)
+              );
             }
 
             async function branchExists(refName) {
@@ -183,11 +210,49 @@ jobs:
               await github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body: text });
             }
 
-            async function ensureAssignedToPreferred(issue, preferredAssignee, allowedAssigneesSet) {
-              if (!issue?.number || !preferredAssignee) return;
+            async function addLabels(issueNumber, labels) {
+              if (!labels.length) return;
+              await github.rest.issues.addLabels({
+                owner,
+                repo,
+                issue_number: issueNumber,
+                labels,
+              });
+            }
+
+            async function removeLabelIfPresent(issueNumber, labelName) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner,
+                  repo,
+                  issue_number: issueNumber,
+                  name: labelName,
+                });
+              } catch (e) {
+                if (e?.status !== 404) throw e;
+              }
+            }
+
+            async function ensureAssignedToPreferred(issue, preferredAssignee, allowedAssigneesSet, assignableAssigneesSet) {
+              if (!issue?.number || !preferredAssignee) {
+                return { assigned: false, verified: false, preferredUnavailable: false };
+              }
+
+              const preferredLogin = String(preferredAssignee || '').toLowerCase();
               const current = (issue.assignees || []).map(a => String(a?.login || '').toLowerCase()).filter(Boolean);
+              if (current.includes(preferredLogin)) {
+                return { assigned: true, verified: true, preferredUnavailable: false };
+              }
+
               const hasAllowedAssignee = current.some(login => allowedAssigneesSet.has(login));
-              if (hasAllowedAssignee) return;
+              if (hasAllowedAssignee) {
+                return { assigned: false, verified: true, preferredUnavailable: false };
+              }
+
+              if (!assignableAssigneesSet.has(preferredLogin)) {
+                core.warning(`Preferred assignee ${preferredAssignee} is not assignable via the repository issues API.`);
+                return { assigned: false, verified: false, preferredUnavailable: true };
+              }
 
               try {
                 await github.rest.issues.addAssignees({
@@ -196,9 +261,21 @@ jobs:
                   issue_number: issue.number,
                   assignees: [preferredAssignee],
                 });
-                core.info(`Assigned issue #${issue.number} to ${preferredAssignee}.`);
+                const refreshed = await github.rest.issues.get({ owner, repo, issue_number: issue.number });
+                const refreshedAssignees = (refreshed.data.assignees || [])
+                  .map(assignee => String(assignee?.login || '').toLowerCase())
+                  .filter(Boolean);
+
+                if (refreshedAssignees.includes(preferredLogin)) {
+                  core.info(`Assigned issue #${issue.number} to ${preferredAssignee}.`);
+                  return { assigned: true, verified: true, preferredUnavailable: false };
+                }
+
+                core.warning(`GitHub accepted assignment for issue #${issue.number}, but ${preferredAssignee} is not present in the resulting issue assignees.`);
+                return { assigned: false, verified: false, preferredUnavailable: true };
               } catch (e) {
                 core.warning(`Could not assign issue #${issue.number} to ${preferredAssignee}: ${e.message || e}`);
+                return { assigned: false, verified: false, preferredUnavailable: true };
               }
             }
 
@@ -211,6 +288,7 @@ jobs:
             const allowedAssigneesList = parseCsvList(process.env.KICKOFF_ALLOWED_ASSIGNEES, ALLOWED_ASSIGNEES_DEFAULT);
             const allowedAssignees = parseCsvSet(process.env.KICKOFF_ALLOWED_ASSIGNEES, ALLOWED_ASSIGNEES_DEFAULT);
             const preferredAssignee = allowedAssigneesList[0] || ALLOWED_ASSIGNEES_DEFAULT;
+            const assignableAssignees = await listAssignableAssignees();
 
             let orchestratorIssue = null;
             let forcedIssueNumber = null;
@@ -234,11 +312,12 @@ jobs:
                 }
 
                 if (!dryRun) {
-                  await ensureAssignedToPreferred(issue, preferredAssignee, allowedAssignees);
+                  await ensureAssignedToPreferred(issue, preferredAssignee, allowedAssignees, assignableAssignees);
                 }
                 orchestratorIssue = issue;
               } else if (isMilestone) {
                 // Allow direct task kickoff by assigning a milestone issue.
+                const isAiStartLabelEvent = action === 'labeled' && eventLabel === 'ai-start';
                 const shouldKick = action === 'assigned' || isReadyLabelEvent || labels.includes('kickoff') || labels.includes('ai-start');
                 if (!shouldKick) {
                   core.info('Milestone issue event does not request kickoff (assign, ready, kickoff, or ai-start label).');
@@ -261,7 +340,7 @@ jobs:
                 }
 
                 // For label-triggered kickoffs, ensure at least one current assignee is allowed.
-                if (!isReadyLabelEvent && action !== 'assigned') {
+                if (!isReadyLabelEvent && !isAiStartLabelEvent && action !== 'assigned') {
                   const currentAssignees = (issue?.assignees || []).map(a => String(a?.login || '').toLowerCase()).filter(Boolean);
                   const hasAllowed = currentAssignees.some(login => allowedAssignees.has(login));
                   if (!hasAllowed) {
@@ -296,7 +375,7 @@ jobs:
               }
 
               if (orchestratorIssue && !dryRun) {
-                await ensureAssignedToPreferred(orchestratorIssue, preferredAssignee, allowedAssignees);
+                await ensureAssignedToPreferred(orchestratorIssue, preferredAssignee, allowedAssignees, assignableAssignees);
               }
             }
 
@@ -308,13 +387,20 @@ jobs:
             }
 
             const openPhasePrs = await listOpenPhasePrs();
+            const phaseBranches = await listPhaseBranches();
             const mergedPhasePrs = await listMergedPhasePrs();
-            const openMilestones = new Set(
+            const openPrMilestones = new Set(
               openPhasePrs
                 .map(pr => (String(pr.title || '').match(/\bM\d+\b/i) || [null])[0])
                 .filter(Boolean)
                 .map(s => String(s).toUpperCase())
             );
+            const branchMilestones = new Set(
+              phaseBranches
+                .map(branch => milestoneFromBranchName(branch.name))
+                .filter(Boolean)
+            );
+            const activeMilestones = new Set([...openPrMilestones, ...branchMilestones]);
             const completedMilestones = new Set(
               mergedPhasePrs
                 .map(pr => milestoneFromPr(pr))
@@ -334,7 +420,7 @@ jobs:
                 const blockedByUnmergedDep = deps.some(dep => !completedMilestones.has(dep));
                 return { issue: i, milestone, deps, blockedByUnmergedDep };
               })
-              .filter(x => x.milestone && !x.blockedByUnmergedDep && !openMilestones.has(x.milestone))
+              .filter(x => x.milestone && !x.blockedByUnmergedDep && !activeMilestones.has(x.milestone))
               .sort((a, b) => {
                 const na = Number((a.milestone.match(/\d+/) || [999])[0]);
                 const nb = Number((b.milestone.match(/\d+/) || [999])[0]);
@@ -343,19 +429,25 @@ jobs:
 
             let toStart;
             if (forcedIssueNumber != null) {
+              const forcedIssue = milestoneIssues.find(i => i.number === forcedIssueNumber) || null;
+              const forcedMilestone = forcedIssue ? milestoneFromLabels(forcedIssue) : null;
+              if (forcedMilestone && activeMilestones.has(forcedMilestone)) {
+                core.info(`Forced milestone ${forcedMilestone} already has active phase work; skipping duplicate kickoff.`);
+                return;
+              }
+
               const forced = candidates.find(c => c.issue.number === forcedIssueNumber);
               if (!forced) {
-                const forcedIssue = milestoneIssues.find(i => i.number === forcedIssueNumber);
                 if (forcedIssue && !dryRun) {
-                  const forcedMilestone = milestoneFromLabels(forcedIssue) || 'unknown';
+                  const unresolvedMilestone = milestoneFromLabels(forcedIssue) || 'unknown';
                   const deps = depsFromBody(forcedIssue);
                   const blocked = deps.filter(dep => {
                     const depIssue = byMilestone.get(dep);
                     return depIssue && String(depIssue.state || '').toLowerCase() !== 'closed';
                   });
                   let reason = 'task is not currently startable';
-                  if (openMilestones.has(forcedMilestone)) {
-                    reason = `an open phase PR already exists for ${forcedMilestone}`;
+                  if (activeMilestones.has(unresolvedMilestone)) {
+                    reason = `phase work is already active for ${unresolvedMilestone}`;
                   } else if (blocked.length) {
                     reason = `blocked by open dependencies: ${blocked.join(', ')}`;
                   }
@@ -384,9 +476,12 @@ jobs:
               const headRef = `phase/${milestone}-${suffix}`;
 
               try {
+                let assignmentResult = { assigned: false, verified: false, preferredUnavailable: false };
 
                 if (!dryRun) {
-                  await ensureAssignedToPreferred(issue, preferredAssignee, allowedAssignees);
+                  assignmentResult = await ensureAssignedToPreferred(issue, preferredAssignee, allowedAssignees, assignableAssignees);
+                  await removeLabelIfPresent(issue.number, 'state:ready');
+                  await addLabels(issue.number, ['state:in-progress']);
                 }
                 const exists = await branchExists(headRef);
                 if (!exists && !dryRun) {
@@ -399,6 +494,9 @@ jobs:
                   const guidance = [
                     `Kickoff prepared branch \`${headRef}\` from \`${BASE_BRANCH}\`.`,
                     `Open a PR into \`${BASE_BRANCH}\` with \`Closes #${issue.number}\` once real implementation changes exist.`,
+                    assignmentResult.preferredUnavailable
+                      ? `Preferred assignee \`${preferredAssignee}\` is not assignable via the repository issues API, so the workflow marked this issue \`state:in-progress\` instead of recording a verified assignee.`
+                      : null,
                     orchestratorIssue ? `Related orchestration: #${orchestratorIssue.number}.` : null,
                   ].filter(Boolean).join(' ');
                   await addComment(issue.number, guidance);
