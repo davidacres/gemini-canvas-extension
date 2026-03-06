@@ -70,13 +70,13 @@ Recommended PR convention for phase branches:
 - Branch protection on `main` should require:
   - Pull request before merge
   - Required checks
-  - Required approvals
+  - Approvals optional (currently 0 required)
 - Branch protection on `plan-base` should require:
   - Pull request before merge
   - Required checks:
     - `Phase gate / phase-gate`
     - your CI/test checks
-  - Required approvals
+  - Approvals optional (currently 0 required)
 - Optional: CODEOWNERS for deterministic reviewer routing
 
 You can enforce these automatically by running:
