@@ -95,7 +95,7 @@ jobs:
             }
 
             // 1) If a phase PR merged into plan-base, close linked milestone issues.
-            if (context.eventName === 'pull_request') {
+            if (context.eventName === 'pull_request' || context.eventName === 'pull_request_target') {
               const pr = context.payload.pull_request;
               if (pr?.merged && pr.base?.ref === 'plan-base' && String(pr.head?.ref || '').startsWith('phase/')) {
                 const linked = parseLinkedIssueNumbers(`${pr.title || ''}\n${pr.body || ''}`);
