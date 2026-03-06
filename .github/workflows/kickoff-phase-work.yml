@@ -32,6 +32,8 @@ jobs:
     steps:
       - name: Start next ready phases
         uses: actions/github-script@v7
+        env:
+          KICKOFF_ALLOWED_ASSIGNEES: ${{ vars.KICKOFF_ALLOWED_ASSIGNEES }}
         with:
           github-token: ${{ secrets.PLAN_SYNC_TOKEN || github.token }}
           script: |
@@ -41,6 +43,26 @@ jobs:
             const PLAN_SYNC_LABEL = 'plan-sync';
             const BASE_BRANCH = 'plan-base';
             const MAX_PARALLEL_DEFAULT = 2;
+            const ALLOWED_ASSIGNEES_DEFAULT = 'copilot';
+            const READY_LABELS = new Set(['ready', 'state:ready']);
+
+            function parseCsvList(value, fallbackCsv) {
+              const raw = String(value || fallbackCsv || '');
+              return raw
+                .split(',')
+                .map(s => s.trim())
+                .filter(Boolean);
+            }
+
+            function parseCsvSet(value, fallbackCsv) {
+              const raw = String(value || fallbackCsv || '');
+              return new Set(
+                raw
+                  .split(',')
+                  .map(s => s.trim().toLowerCase())
+                  .filter(Boolean)
+              );
+            }
 
             function parseBool(v, fallback = false) {
               if (v == null) return fallback;
@@ -101,6 +123,24 @@ jobs:
                 per_page: 100,
               });
               return prs.filter(pr => String(pr.head?.ref || '').startsWith('phase/'));
+            }
+
+            async function listMergedPhasePrs() {
+              const prs = await github.paginate(github.rest.pulls.list, {
+                owner,
+                repo,
+                state: 'closed',
+                base: BASE_BRANCH,
+                per_page: 100,
+              });
+              return prs.filter(pr => pr.merged_at && String(pr.head?.ref || '').startsWith('phase/'));
+            }
+
+            function milestoneFromPr(pr) {
+              const fromTitle = (String(pr?.title || '').match(/\bM\d+\b/i) || [null])[0];
+              if (fromTitle) return String(fromTitle).toUpperCase();
+              const fromBranch = (String(pr?.head?.ref || '').match(/\bM\d+\b/i) || [null])[0];
+              return fromBranch ? String(fromBranch).toUpperCase() : null;
             }
 
             async function getBaseRefSha() {
@@ -229,29 +269,98 @@ jobs:
               await github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body: text });
             }
 
+            async function ensureAssignedToPreferred(issue, preferredAssignee, allowedAssigneesSet) {
+              if (!issue?.number || !preferredAssignee) return;
+              const current = (issue.assignees || []).map(a => String(a?.login || '').toLowerCase()).filter(Boolean);
+              const hasAllowedAssignee = current.some(login => allowedAssigneesSet.has(login));
+              if (hasAllowedAssignee) return;
+
+              try {
+                await github.rest.issues.addAssignees({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  assignees: [preferredAssignee],
+                });
+                core.info(`Assigned issue #${issue.number} to ${preferredAssignee}.`);
+              } catch (e) {
+                core.warning(`Could not assign issue #${issue.number} to ${preferredAssignee}: ${e.message || e}`);
+              }
+            }
+
             const eventName = context.eventName;
             const action = context.payload.action;
             const inputMax = context.payload.inputs?.max_parallel;
             const inputDry = context.payload.inputs?.dry_run;
             const maxParallel = parseIntSafe(inputMax, MAX_PARALLEL_DEFAULT);
             const dryRun = parseBool(inputDry, false);
+            const allowedAssigneesList = parseCsvList(process.env.KICKOFF_ALLOWED_ASSIGNEES, ALLOWED_ASSIGNEES_DEFAULT);
+            const allowedAssignees = parseCsvSet(process.env.KICKOFF_ALLOWED_ASSIGNEES, ALLOWED_ASSIGNEES_DEFAULT);
+            const preferredAssignee = allowedAssigneesList[0] || ALLOWED_ASSIGNEES_DEFAULT;
 
             let orchestratorIssue = null;
+            let forcedIssueNumber = null;
 
             if (eventName === 'issues') {
               const issue = context.payload.issue;
               const labels = (issue?.labels || []).map(l => l.name);
-              if (!labels.includes(ORCHESTRATOR_LABEL)) {
-                core.info('Issue event is not for orchestrator issue; skipping kickoff.');
+              const isOrchestrator = labels.includes(ORCHESTRATOR_LABEL);
+              const milestone = milestoneFromLabels(issue);
+              const isMilestone = labels.includes(PLAN_SYNC_LABEL) && !!milestone;
+              const eventLabel = String(context.payload.label?.name || '').toLowerCase();
+              const isReadyLabelEvent = action === 'labeled' && READY_LABELS.has(eventLabel);
+
+              if (isOrchestrator) {
+                // Kick on assignment, explicit kickoff label, or ready label event.
+                const shouldKick = action === 'assigned' || isReadyLabelEvent || labels.includes('kickoff');
+                if (!shouldKick) {
+                  core.info('Orchestrator event does not request kickoff (assign, ready, or kickoff label).');
+                  return;
+                }
+                orchestratorIssue = issue;
+              } else if (isMilestone) {
+                // Allow direct task kickoff by assigning a milestone issue.
+                const shouldKick = action === 'assigned' || isReadyLabelEvent || labels.includes('kickoff') || labels.includes('ai-start');
+                if (!shouldKick) {
+                  core.info('Milestone issue event does not request kickoff (assign, ready, kickoff, or ai-start label).');
+                  return;
+                }
+
+                // Guardrail: only auto-kick milestone assignment for allowed assignees (default: copilot).
+                if (action === 'assigned') {
+                  const assignedLogin = String(context.payload.assignee?.login || '').toLowerCase();
+                  if (!allowedAssignees.has(assignedLogin)) {
+                    if (!dryRun) {
+                      await addComment(
+                        issue.number,
+                        `Kickoff skipped: assignment to @${assignedLogin || 'unknown'} is not in allowed assignees (${[...allowedAssignees].join(', ')}).`,
+                      );
+                    }
+                    core.info(`Assigned user ${assignedLogin || '(none)'} is not in allowed kickoff assignees (${[...allowedAssignees].join(', ')}); skipping.`);
+                    return;
+                  }
+                }
+
+                // For label-triggered kickoffs, ensure at least one current assignee is allowed.
+                if (!isReadyLabelEvent && action !== 'assigned') {
+                  const currentAssignees = (issue?.assignees || []).map(a => String(a?.login || '').toLowerCase()).filter(Boolean);
+                  const hasAllowed = currentAssignees.some(login => allowedAssignees.has(login));
+                  if (!hasAllowed) {
+                    if (!dryRun) {
+                      await addComment(
+                        issue.number,
+                        `Kickoff skipped: no allowed assignee present. Allowed assignees: ${[...allowedAssignees].join(', ')}.`,
+                      );
+                    }
+                    core.info(`Milestone label-triggered kickoff requires an allowed assignee (${[...allowedAssignees].join(', ')}); skipping.`);
+                    return;
+                  }
+                }
+                forcedIssueNumber = issue.number;
+              } else {
+                core.info('Issue event is not for orchestrator or milestone issue; skipping kickoff.');
                 return;
               }
-              // Kick only on assignment or explicit kickoff label.
-              const shouldKick = action === 'assigned' || labels.includes('kickoff');
-              if (!shouldKick) {
-                core.info('Orchestrator event does not request kickoff (assign or kickoff label).');
-                return;
-              }
-              orchestratorIssue = issue;
             } else {
               const openOrchestrators = await github.paginate(github.rest.issues.listForRepo, {
                 owner,
@@ -271,11 +380,17 @@ jobs:
             }
 
             const openPhasePrs = await listOpenPhasePrs();
+            const mergedPhasePrs = await listMergedPhasePrs();
             const openMilestones = new Set(
               openPhasePrs
                 .map(pr => (String(pr.title || '').match(/\bM\d+\b/i) || [null])[0])
                 .filter(Boolean)
                 .map(s => String(s).toUpperCase())
+            );
+            const completedMilestones = new Set(
+              mergedPhasePrs
+                .map(pr => milestoneFromPr(pr))
+                .filter(Boolean)
             );
 
             const availableSlots = Math.max(0, maxParallel - openPhasePrs.length);
@@ -288,20 +403,45 @@ jobs:
               .map(i => {
                 const milestone = milestoneFromLabels(i);
                 const deps = depsFromBody(i);
-                const blockedByOpenDep = deps.some(dep => {
-                  const depIssue = byMilestone.get(dep);
-                  return depIssue && String(depIssue.state || '').toLowerCase() !== 'closed';
-                });
-                return { issue: i, milestone, deps, blockedByOpenDep };
+                const blockedByUnmergedDep = deps.some(dep => !completedMilestones.has(dep));
+                return { issue: i, milestone, deps, blockedByUnmergedDep };
               })
-              .filter(x => x.milestone && !x.blockedByOpenDep && !openMilestones.has(x.milestone))
+              .filter(x => x.milestone && !x.blockedByUnmergedDep && !openMilestones.has(x.milestone))
               .sort((a, b) => {
                 const na = Number((a.milestone.match(/\d+/) || [999])[0]);
                 const nb = Number((b.milestone.match(/\d+/) || [999])[0]);
                 return na - nb;
               });
 
-            const toStart = candidates.slice(0, availableSlots);
+            let toStart;
+            if (forcedIssueNumber != null) {
+              const forced = candidates.find(c => c.issue.number === forcedIssueNumber);
+              if (!forced) {
+                const forcedIssue = milestoneIssues.find(i => i.number === forcedIssueNumber);
+                if (forcedIssue && !dryRun) {
+                  const forcedMilestone = milestoneFromLabels(forcedIssue) || 'unknown';
+                  const deps = depsFromBody(forcedIssue);
+                  const blocked = deps.filter(dep => {
+                    const depIssue = byMilestone.get(dep);
+                    return depIssue && String(depIssue.state || '').toLowerCase() !== 'closed';
+                  });
+                  let reason = 'task is not currently startable';
+                  if (openMilestones.has(forcedMilestone)) {
+                    reason = `an open phase PR already exists for ${forcedMilestone}`;
+                  } else if (blocked.length) {
+                    reason = `blocked by open dependencies: ${blocked.join(', ')}`;
+                  }
+                  await addComment(forcedIssueNumber, `Kickoff did not start this task yet: ${reason}.`);
+                }
+                core.info('Forced milestone is not currently dependency-ready.');
+                return;
+              }
+
+              const remaining = candidates.filter(c => c.issue.number !== forcedIssueNumber);
+              toStart = [forced, ...remaining].slice(0, availableSlots);
+            } else {
+              toStart = candidates.slice(0, availableSlots);
+            }
             if (!toStart.length) {
               core.info('No dependency-ready milestone issues available to kickoff.');
               return;
@@ -316,6 +456,10 @@ jobs:
               const headRef = `phase/${milestone}-${suffix}`;
 
               try {
+
+                if (!dryRun) {
+                  await ensureAssignedToPreferred(issue, preferredAssignee, allowedAssignees);
+                }
                 const exists = await branchExists(headRef);
                 let createdNow = false;
                 if (!exists && !dryRun) {
@@ -335,7 +479,7 @@ jobs:
                 results.push(`started ${milestone} -> ${headRef} ${prRef}`);
 
                 if (!dryRun) {
-                  await addComment(issue.number, `Kickoff created draft PR ${pr.html_url} from branch \`${headRef}\`.`);
+                  await addComment(issue.number, `Kickoff created PR ${pr.html_url} from branch \`${headRef}\`.`);
                 }
               } catch (e) {
                 results.push(`failed ${milestone}: ${e.message || e}`);

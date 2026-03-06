@@ -5,9 +5,6 @@ name: Execution controller
   pull_request_target:
     types:
       - closed
-  issues:
-    types:
-      - closed
 
 permissions:
   contents: write
@@ -94,10 +91,13 @@ jobs:
               });
             }
 
+            let phaseAdvanceTriggered = false;
+
             // 1) If a phase PR merged into plan-base, close linked milestone issues.
-            if (context.eventName === 'pull_request') {
+            if (context.eventName === 'pull_request' || context.eventName === 'pull_request_target') {
               const pr = context.payload.pull_request;
               if (pr?.merged && pr.base?.ref === 'plan-base' && String(pr.head?.ref || '').startsWith('phase/')) {
+                phaseAdvanceTriggered = true;
                 const linked = parseLinkedIssueNumbers(`${pr.title || ''}\n${pr.body || ''}`);
                 for (const n of linked) {
                   const issue = await getIssue(n);
@@ -108,8 +108,15 @@ jobs:
                   }
                 }
               } else {
-                core.info('PR event is not a merged phase PR into plan-base; skipping close step.');
+                core.info('PR event is not a merged phase PR into plan-base; skipping close step (eventName=' + context.eventName + ').');
               }
+            } else {
+              core.info(`Ignoring event ${context.eventName}; execution advances only from merged phase PRs.`);
+            }
+
+            if (context.eventName !== 'workflow_dispatch' && !phaseAdvanceTriggered) {
+              core.info('No merged phase PR detected; skipping kickoff/promotion dispatch.');
+              return;
             }
 
             // 2) Decide next workflow action based on remaining open milestones.
