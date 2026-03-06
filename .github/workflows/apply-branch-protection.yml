@@ -53,12 +53,18 @@ jobs:
 
             await applyProtection('plan-base', {
               ...shared,
-              required_status_checks: null,
+              required_status_checks: {
+                strict: true,
+                contexts: ['Quality (ubuntu-latest)'],
+              },
             });
 
             await applyProtection('main', {
               ...shared,
-              required_status_checks: null,
+              required_status_checks: {
+                strict: true,
+                contexts: ['Quality (ubuntu-latest)'],
+              },
             });
 
             core.info('Applied branch protection to plan-base and main.');

@@ -71,11 +71,13 @@ Recommended PR convention for phase branches:
 ## Required repository settings
 - Branch protection on `main` should require:
   - Pull request before merge
-  - Required checks
+  - Required checks:
+    - `Quality (ubuntu-latest)` from `.github/workflows/ci.yml`
   - Approvals optional (currently 0 required)
 - Branch protection on `plan-base` should require:
   - Pull request before merge
-  - Required checks optional (currently none required in single-maintainer mode)
+  - Required checks:
+    - `Quality (ubuntu-latest)` from `.github/workflows/ci.yml`
   - Approvals optional (currently 0 required)
 - Optional: CODEOWNERS for deterministic reviewer routing
 
