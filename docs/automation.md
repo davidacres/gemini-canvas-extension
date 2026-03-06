@@ -69,6 +69,10 @@ Recommended PR convention for phase branches:
     - Draft PR -> `wip`
     - Ready PR -> `needs-review`
     - Approved review -> `ready-to-merge`
+  - Phase auto-approval:
+    - For `phase/* -> plan-base` PRs, automation submits an approval when none is active
+    - Re-applies approval after new commits/review events when needed
+    - Disable by setting repository variable `AUTO_APPROVE_PHASE_PRS=false`
   - Optional auto-merge:
     - Add label `automerge` to a PR
     - Workflow attempts to enable GitHub auto-merge (still requires branch protection checks/approvals)

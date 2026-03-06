@@ -45,6 +45,17 @@ jobs:
                 .filter(Boolean);
             }
 
+            function parseBool(raw, fallback = false) {
+              if (raw == null || raw === '') return fallback;
+              const value = String(raw).trim().toLowerCase();
+              return ['1', 'true', 'yes', 'on'].includes(value);
+            }
+
+            function isPhasePlanPr(pr) {
+              return pr?.base?.ref === 'plan-base'
+                && String(pr?.head?.ref || '').startsWith('phase/');
+            }
+
             function getPrFromPayload() {
               if (context.payload.pull_request) return context.payload.pull_request;
               if (context.payload.review?.pull_request_url) return null;
@@ -142,6 +153,55 @@ jobs:
               }
             }
 
+            async function hasActiveApproval(prNumber) {
+              const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                per_page: 100,
+              });
+
+              const latestByAuthor = new Map();
+              for (const review of reviews) {
+                const login = review?.user?.login;
+                if (!login) continue;
+                latestByAuthor.set(login, String(review.state || '').toUpperCase());
+              }
+
+              for (const state of latestByAuthor.values()) {
+                if (state === 'APPROVED') return true;
+              }
+              return false;
+            }
+
+            async function maybeAutoApprovePhasePr(pr) {
+              const enabled = parseBool(process.env.AUTO_APPROVE_PHASE_PRS, true);
+              if (!enabled) return false;
+              if (!pr?.number || !pr?.state) return false;
+              if (pr.state !== 'open' || pr.draft) return false;
+              if (!isPhasePlanPr(pr)) return false;
+
+              if (await hasActiveApproval(pr.number)) {
+                core.info(`PR #${pr.number} already has an active approval.`);
+                return true;
+              }
+
+              try {
+                await github.rest.pulls.createReview({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: pr.number,
+                  event: 'APPROVE',
+                  body: 'Automated approval for phase progression.',
+                });
+                core.info(`Submitted automated approval for PR #${pr.number}.`);
+                return true;
+              } catch (e) {
+                core.warning(`Could not auto-approve PR #${pr.number}: ${e.message || e}`);
+                return false;
+              }
+            }
+
             async function listChangedFiles(prNumber) {
               return await github.paginate(github.rest.pulls.listFiles, {
                 owner: context.repo.owner,
@@ -161,8 +221,7 @@ jobs:
             async function maybeMarkReadyForReview(pr) {
               if (!pr?.number || !pr?.node_id) return pr;
               if (!pr.draft || pr.state !== 'open') return pr;
-              if (pr.base?.ref !== 'plan-base') return pr;
-              if (!String(pr.head?.ref || '').startsWith('phase/')) return pr;
+              if (!isPhasePlanPr(pr)) return pr;
 
               const files = await listChangedFiles(pr.number);
               if (!hasRealWorkChanges(files)) {
@@ -214,6 +273,10 @@ jobs:
                 await replaceWorkflowLabels(pr.number, isDraft ? 'wip' : 'needs-review');
                 if (!isDraft) {
                   await maybeRequestReviewers(pr, configuredReviewers);
+                  const approved = await maybeAutoApprovePhasePr(pr);
+                  if (approved) {
+                    await replaceWorkflowLabels(pr.number, 'ready-to-merge');
+                  }
                 }
                 await maybeEnableAutoMerge(pr);
               }
@@ -228,5 +291,11 @@ jobs:
               if (state === 'approved') {
                 await replaceWorkflowLabels(pr.number, 'ready-to-merge');
                 await maybeEnableAutoMerge(pr);
+              } else {
+                const approved = await maybeAutoApprovePhasePr(pr);
+                if (approved) {
+                  await replaceWorkflowLabels(pr.number, 'ready-to-merge');
+                  await maybeEnableAutoMerge(pr);
+                }
               }
             }
