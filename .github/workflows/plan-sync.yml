@@ -186,8 +186,50 @@ jobs:
               if (!PROJECT_V2.enabled) return null;
 
               const query = PROJECT_V2.ownerType === 'org'
-                ? `query($login:String!, $number:Int!) { organization(login:$login){ projectV2(number:$number){ id title fields(first:50){ nodes{ __typename ... on ProjectV2SingleSelectField{ id name options{ id name } } ... on ProjectV2FieldCommon{ id name } } } } } }`
-                : `query($login:String!, $number:Int!) { user(login:$login){ projectV2(number:$number){ id title fields(first:50){ nodes{ __typename ... on ProjectV2SingleSelectField{ id name options{ id name } } ... on ProjectV2FieldCommon{ id name } } } } } } }`;
+                ? `query($login:String!, $number:Int!) {
+                    organization(login:$login) {
+                      projectV2(number:$number) {
+                        id
+                        title
+                        fields(first:50) {
+                          nodes {
+                            __typename
+                            ... on ProjectV2SingleSelectField {
+                              id
+                              name
+                              options { id name }
+                            }
+                            ... on ProjectV2FieldCommon {
+                              id
+                              name
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }`
+                : `query($login:String!, $number:Int!) {
+                    user(login:$login) {
+                      projectV2(number:$number) {
+                        id
+                        title
+                        fields(first:50) {
+                          nodes {
+                            __typename
+                            ... on ProjectV2SingleSelectField {
+                              id
+                              name
+                              options { id name }
+                            }
+                            ... on ProjectV2FieldCommon {
+                              id
+                              name
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }`;
 
               const resp = await github.graphql(query, { login: PROJECT_V2.ownerLogin, number: PROJECT_V2.number });
               const ownerNode = PROJECT_V2.ownerType === 'org' ? resp.organization : resp.user;
