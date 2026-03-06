@@ -167,104 +167,6 @@ jobs:
               });
             }
 
-            async function sleep(ms) {
-              await new Promise(resolve => setTimeout(resolve, ms));
-            }
-
-            async function ensureSeedCommit(refName, milestone, issueNumber, skipCompare = false) {
-              // If there are no commits ahead of base, PR creation fails. Seed with a small kickoff file.
-              if (!skipCompare) {
-                try {
-                  const cmp = await github.rest.repos.compareCommits({
-                    owner,
-                    repo,
-                    basehead: `${BASE_BRANCH}...${refName}`,
-                  });
-                  if ((cmp.data.total_commits || 0) > 0) return;
-                } catch (e) {
-                  // If compare temporarily fails (ref propagation race), continue and try to seed anyway.
-                  if (e?.status !== 404) throw e;
-                }
-              }
-
-              const path = `.phase-kickoff/${milestone}.md`;
-              let existingSha = null;
-              let content = [
-                `# ${milestone} kickoff`,
-                '',
-                `Created by kickoff workflow from issue #${issueNumber}.`,
-                '',
-                `Timestamp: ${new Date().toISOString()}`,
-              ].join('\n');
-
-              try {
-                const existing = await github.rest.repos.getContent({
-                  owner,
-                  repo,
-                  path,
-                  ref: refName,
-                });
-                if (!Array.isArray(existing.data) && existing.data.sha) {
-                  existingSha = existing.data.sha;
-                }
-              } catch (e) {
-                if (e?.status !== 404) throw e;
-              }
-
-              for (let attempt = 0; attempt < 3; attempt++) {
-                try {
-                  await github.rest.repos.createOrUpdateFileContents({
-                    owner,
-                    repo,
-                    path,
-                    branch: refName,
-                    message: `chore(${milestone}): seed kickoff branch`,
-                    content: Buffer.from(content, 'utf8').toString('base64'),
-                    ...(existingSha ? { sha: existingSha } : {}),
-                  });
-                  return;
-                } catch (e) {
-                  if (e?.status === 404 && attempt < 2) {
-                    await sleep(1500);
-                    continue;
-                  }
-                  throw e;
-                }
-              }
-            }
-            async function findOpenPrByHead(headRef) {
-              const prs = await github.paginate(github.rest.pulls.list, {
-                owner,
-                repo,
-                state: 'open',
-                head: `${owner}:${headRef}`,
-                base: BASE_BRANCH,
-                per_page: 10,
-              });
-              return prs[0] || null;
-            }
-
-            async function createPrForIssue(issue, milestone, headRef, orchestratorIssue) {
-              const title = `[${milestone}] ${issue.title.replace(/^\[[^\]]+\]\s*/, '')}`;
-              const body = [
-                `Closes #${issue.number}`,
-                orchestratorIssue ? `Related orchestration: #${orchestratorIssue.number}` : null,
-                '',
-                'Auto-created kickoff PR from orchestrator workflow.',
-              ].filter(Boolean).join('\n');
-
-              const created = await github.rest.pulls.create({
-                owner,
-                repo,
-                head: headRef,
-                base: BASE_BRANCH,
-                title,
-                body,
-                draft: false,
-              });
-              return created.data;
-            }
-
             async function addComment(issueNumber, text) {
               await github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body: text });
             }
@@ -311,10 +213,11 @@ jobs:
               const isReadyLabelEvent = action === 'labeled' && READY_LABELS.has(eventLabel);
 
               if (isOrchestrator) {
-                // Kick on assignment, explicit kickoff label, or ready label event.
-                const shouldKick = action === 'assigned' || isReadyLabelEvent || labels.includes('kickoff');
+                // Kick only from explicit orchestration signals. Assignment is ignored so Copilot
+                // does not start implementation work from the parent orchestration issue.
+                const shouldKick = isReadyLabelEvent || labels.includes('kickoff');
                 if (!shouldKick) {
-                  core.info('Orchestrator event does not request kickoff (assign, ready, or kickoff label).');
+                  core.info('Orchestrator event does not request kickoff (ready or kickoff label only).');
                   return;
                 }
                 orchestratorIssue = issue;
@@ -461,25 +364,19 @@ jobs:
                   await ensureAssignedToPreferred(issue, preferredAssignee, allowedAssignees);
                 }
                 const exists = await branchExists(headRef);
-                let createdNow = false;
                 if (!exists && !dryRun) {
                   await createBranch(headRef, baseSha);
-                  createdNow = true;
                 }
+
+                results.push(`prepared ${milestone} -> ${headRef}`);
 
                 if (!dryRun) {
-                  await ensureSeedCommit(headRef, milestone, issue.number, createdNow);
-                }
-                let pr = await findOpenPrByHead(headRef);
-                if (!pr && !dryRun) {
-                  pr = await createPrForIssue(issue, milestone, headRef, orchestratorIssue);
-                }
-
-                const prRef = pr ? `#${pr.number}` : '(dry-run)';
-                results.push(`started ${milestone} -> ${headRef} ${prRef}`);
-
-                if (!dryRun) {
-                  await addComment(issue.number, `Kickoff created PR ${pr.html_url} from branch \`${headRef}\`.`);
+                  const guidance = [
+                    `Kickoff prepared branch \`${headRef}\` from \`${BASE_BRANCH}\`.`,
+                    `Open a PR into \`${BASE_BRANCH}\` with \`Closes #${issue.number}\` once real implementation changes exist.`,
+                    orchestratorIssue ? `Related orchestration: #${orchestratorIssue.number}.` : null,
+                  ].filter(Boolean).join(' ');
+                  await addComment(issue.number, guidance);
                 }
               } catch (e) {
                 results.push(`failed ${milestone}: ${e.message || e}`);
