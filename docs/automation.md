@@ -53,6 +53,7 @@ Recommended PR convention for phase branches:
 
 - `.github/workflows/pr-automation.yml`
   - PR labels/reviewers/auto-merge helper
+  - For `phase/* -> plan-base` PRs, auto-converts draft to ready-for-review when non-kickoff files are detected
   - Label behavior:
     - Draft PR -> `wip`
     - Ready PR -> `needs-review`
@@ -80,20 +81,43 @@ Recommended PR convention for phase branches:
   - Executes `lint`, `typecheck`, `test`, `build` scripts when present
 
 - `.github/workflows/kickoff-phase-work.yml`
-  - Starts execution from the orchestrator issue
+  - Starts execution from orchestrator or directly from milestone issue assignment
   - Triggers:
     - assign/reopen/label events on orchestrator issue (`plan-orchestrator`)
+      - labeling orchestrator with `state:ready` (or `ready`) requests kickoff
+    - assign/label events on milestone issues (`plan-sync` + `milestone:Mx`)
+      - labeling a milestone with `state:ready` (or `ready`) requests kickoff
     - manual dispatch (`workflow_dispatch`)
   - Behavior:
     - reads open milestone issues and their dependency metadata
     - selects dependency-ready milestones only
     - respects parallel cap (`max_parallel`, default 2)
+    - auto-assigns started milestone issues to preferred allowed assignee (first entry in `KICKOFF_ALLOWED_ASSIGNEES`, default `copilot`)
     - creates `phase/Mx-*` branches from `plan-base`
     - seeds a minimal kickoff commit on new phase branches (to guarantee PR diff)
     - opens PRs into `plan-base`
   - Notes:
-    - assignment to orchestrator can trigger kickoff
-    - board status changes alone do not trigger this workflow
+    - assignment to orchestrator can trigger batched kickoff
+    - marking orchestrator `state:ready` can also trigger batched kickoff
+    - assignment to a milestone issue prioritizes that specific milestone
+    - marking a milestone issue `state:ready` can trigger kickoff and assignment to preferred assignee
+    - optional label `ai-start` on a milestone issue can request kickoff without reassignment
+    - milestone issue kickoff is gated by assignee allow-list (default: `copilot`)
+      - configure repository variable `KICKOFF_ALLOWED_ASSIGNEES` as comma-separated GitHub logins
+    - if kickoff is skipped by assignee policy, the workflow comments the reason on the milestone issue
+    - board status column moves alone do not trigger this workflow (use labels/assignment)
+
+- `.github/workflows/phase-automerge.yml`
+  - Enables GitHub auto-merge on `phase/* -> plan-base` PRs (squash)
+  - PR merges automatically once required checks pass
+
+- `.github/workflows/execution-controller.yml`
+  - Autonomous progression controller
+  - On merged `phase/* -> plan-base` PR:
+    - closes linked milestone issue(s) from PR body (`Closes #...`)
+    - dispatches kickoff again for next dependency-ready phases
+  - When all milestone issues are closed:
+    - dispatches `promote-plan-base.yml` to open/update promotion PR to `main`
 
 - `.github/workflows/phase-automerge.yml`
   - Enables GitHub auto-merge on `phase/* -> plan-base` PRs (squash)
@@ -119,6 +143,11 @@ Recommended PR convention for phase branches:
     - `Quality (ubuntu-latest)` from `.github/workflows/ci.yml`
   - Approvals optional (currently 0 required)
 - Optional: CODEOWNERS for deterministic reviewer routing
+
+Optional repository variables:
+- `KICKOFF_ALLOWED_ASSIGNEES`
+  - default behavior if unset: only `copilot` assignment triggers milestone auto-kickoff
+  - format: comma-separated GitHub logins (example: `copilot,github-copilot[bot],davidacres`)
 
 You can enforce these automatically by running:
 - `.github/workflows/apply-branch-protection.yml`
