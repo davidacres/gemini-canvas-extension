@@ -49,7 +49,8 @@ jobs:
             };
 
             function normalizeCell(text) {
-              return text
+              const t = text.trim();
+              return t
                 .replace(/^\*\*|\*\*$/g, '')
                 .replace(/`/g, '')
                 .trim();
