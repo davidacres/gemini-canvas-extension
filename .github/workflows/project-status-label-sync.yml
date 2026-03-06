@@ -3,6 +3,7 @@ name: Project status -> issue labels
 "on":
   workflow_dispatch:
   projects_v2_item:
+    types: [edited]
 
 permissions:
   contents: read
