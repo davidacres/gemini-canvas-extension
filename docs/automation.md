@@ -106,7 +106,7 @@ Recommended PR convention for phase branches:
     - auto-assigns started milestone issues to preferred allowed assignee (first entry in `KICKOFF_ALLOWED_ASSIGNEES`, default `copilot`)
     - creates `phase/Mx-*` branches from `plan-base`
     - seeds a minimal kickoff commit on new phase branches (to guarantee PR diff)
-    - opens draft PRs into `plan-base`
+    - opens PRs into `plan-base`
   - Notes:
     - assignment to orchestrator can trigger batched kickoff
     - marking orchestrator `state:ready` can also trigger batched kickoff
@@ -116,7 +116,19 @@ Recommended PR convention for phase branches:
     - milestone issue kickoff is gated by assignee allow-list (default: `copilot`)
       - configure repository variable `KICKOFF_ALLOWED_ASSIGNEES` as comma-separated GitHub logins
     - if kickoff is skipped by assignee policy, the workflow comments the reason on the milestone issue
-    - board status column moves are converted to labels by `project-status-label-sync.yml`; kickoff still responds to issue label/assignment events
+    - board status column moves alone do not trigger this workflow (use labels/assignment)
+
+- `.github/workflows/phase-automerge.yml`
+  - Enables GitHub auto-merge on `phase/* -> plan-base` PRs (squash)
+  - PR merges automatically once required checks pass
+
+- `.github/workflows/execution-controller.yml`
+  - Autonomous progression controller
+  - On merged `phase/* -> plan-base` PR:
+    - closes linked milestone issue(s) from PR body (`Closes #...`)
+    - dispatches kickoff again for next dependency-ready phases
+  - When all milestone issues are closed:
+    - dispatches `promote-plan-base.yml` to open/update promotion PR to `main`
 
 - `.github/workflows/phase-automerge.yml`
   - Enables GitHub auto-merge on `phase/* -> plan-base` PRs (squash)
