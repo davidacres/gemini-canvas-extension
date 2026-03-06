@@ -1,0 +1,285 @@
+name: Kickoff phase work
+
+"on":
+  workflow_dispatch:
+    inputs:
+      max_parallel:
+        description: "Maximum number of phase PRs to keep open in parallel"
+        required: false
+        default: "2"
+      dry_run:
+        description: "If true, report actions without creating branches/PRs"
+        required: false
+        default: "false"
+  issues:
+    types:
+      - assigned
+      - reopened
+      - labeled
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: kickoff-phase-work
+  cancel-in-progress: false
+
+jobs:
+  kickoff:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Start next ready phases
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PLAN_SYNC_TOKEN || github.token }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const ORCHESTRATOR_LABEL = 'plan-orchestrator';
+            const PLAN_SYNC_LABEL = 'plan-sync';
+            const BASE_BRANCH = 'plan-base';
+            const MAX_PARALLEL_DEFAULT = 2;
+
+            function parseBool(v, fallback = false) {
+              if (v == null) return fallback;
+              const s = String(v).trim().toLowerCase();
+              return s === '1' || s === 'true' || s === 'yes';
+            }
+
+            function parseIntSafe(v, fallback) {
+              const n = Number.parseInt(String(v ?? ''), 10);
+              return Number.isFinite(n) && n > 0 ? n : fallback;
+            }
+
+            function milestoneFromLabels(issue) {
+              const labels = (issue.labels || []).map(l => (typeof l === 'string' ? l : l?.name)).filter(Boolean);
+              const hit = labels.find(n => /^milestone:M\d+$/i.test(n));
+              if (!hit) return null;
+              return hit.split(':')[1].toUpperCase();
+            }
+
+            function depsFromBody(issue) {
+              const body = issue.body || '';
+              const m = body.match(/<!--\s*dependencies:\s*([^>]*)-->/i);
+              if (!m) return [];
+              const raw = (m[1] || '').trim();
+              if (!raw) return [];
+              return raw
+                .split(',')
+                .map(s => s.trim().toUpperCase())
+                .filter(Boolean);
+            }
+
+            function slugify(input) {
+              return (input || '')
+                .toLowerCase()
+                .replace(/\[[^\]]+\]/g, '')
+                .replace(/[^a-z0-9]+/g, '-')
+                .replace(/^-+|-+$/g, '')
+                .slice(0, 42) || 'phase-work';
+            }
+
+            async function listMilestoneIssues() {
+              const issues = await github.paginate(github.rest.issues.listForRepo, {
+                owner,
+                repo,
+                state: 'open',
+                labels: PLAN_SYNC_LABEL,
+                per_page: 100,
+              });
+              return issues.filter(i => !i.pull_request && milestoneFromLabels(i));
+            }
+
+            async function listOpenPhasePrs() {
+              const prs = await github.paginate(github.rest.pulls.list, {
+                owner,
+                repo,
+                state: 'open',
+                base: BASE_BRANCH,
+                per_page: 100,
+              });
+              return prs.filter(pr => String(pr.head?.ref || '').startsWith('phase/'));
+            }
+
+            async function getBaseRefSha() {
+              const ref = await github.rest.git.getRef({ owner, repo, ref: `heads/${BASE_BRANCH}` });
+              return ref.data.object.sha;
+            }
+
+            async function branchExists(refName) {
+              try {
+                await github.rest.git.getRef({ owner, repo, ref: `heads/${refName}` });
+                return true;
+              } catch (e) {
+                if (e?.status === 404) return false;
+                throw e;
+              }
+            }
+
+            async function createBranch(refName, sha) {
+              await github.rest.git.createRef({
+                owner,
+                repo,
+                ref: `refs/heads/${refName}`,
+                sha,
+              });
+            }
+
+            async function findOpenPrByHead(headRef) {
+              const prs = await github.paginate(github.rest.pulls.list, {
+                owner,
+                repo,
+                state: 'open',
+                head: `${owner}:${headRef}`,
+                base: BASE_BRANCH,
+                per_page: 10,
+              });
+              return prs[0] || null;
+            }
+
+            async function createDraftPrForIssue(issue, milestone, headRef, orchestratorIssue) {
+              const title = `[${milestone}] ${issue.title.replace(/^\[[^\]]+\]\s*/, '')}`;
+              const body = [
+                `Closes #${issue.number}`,
+                orchestratorIssue ? `Related orchestration: #${orchestratorIssue.number}` : null,
+                '',
+                'Auto-created kickoff PR from orchestrator workflow.',
+              ].filter(Boolean).join('\n');
+
+              const created = await github.rest.pulls.create({
+                owner,
+                repo,
+                head: headRef,
+                base: BASE_BRANCH,
+                title,
+                body,
+                draft: true,
+              });
+              return created.data;
+            }
+
+            async function addComment(issueNumber, text) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body: text });
+            }
+
+            const eventName = context.eventName;
+            const action = context.payload.action;
+            const inputMax = context.payload.inputs?.max_parallel;
+            const inputDry = context.payload.inputs?.dry_run;
+            const maxParallel = parseIntSafe(inputMax, MAX_PARALLEL_DEFAULT);
+            const dryRun = parseBool(inputDry, false);
+
+            let orchestratorIssue = null;
+
+            if (eventName === 'issues') {
+              const issue = context.payload.issue;
+              const labels = (issue?.labels || []).map(l => l.name);
+              if (!labels.includes(ORCHESTRATOR_LABEL)) {
+                core.info('Issue event is not for orchestrator issue; skipping kickoff.');
+                return;
+              }
+              // Kick only on assignment or explicit kickoff label.
+              const shouldKick = action === 'assigned' || labels.includes('kickoff');
+              if (!shouldKick) {
+                core.info('Orchestrator event does not request kickoff (assign or kickoff label).');
+                return;
+              }
+              orchestratorIssue = issue;
+            } else {
+              const openOrchestrators = await github.paginate(github.rest.issues.listForRepo, {
+                owner,
+                repo,
+                state: 'open',
+                labels: ORCHESTRATOR_LABEL,
+                per_page: 10,
+              });
+              orchestratorIssue = openOrchestrators.find(i => !i.pull_request) || null;
+            }
+
+            const milestoneIssues = await listMilestoneIssues();
+            const byMilestone = new Map();
+            for (const i of milestoneIssues) {
+              const m = milestoneFromLabels(i);
+              if (m) byMilestone.set(m, i);
+            }
+
+            const openPhasePrs = await listOpenPhasePrs();
+            const openMilestones = new Set(
+              openPhasePrs
+                .map(pr => (String(pr.title || '').match(/\bM\d+\b/i) || [null])[0])
+                .filter(Boolean)
+                .map(s => String(s).toUpperCase())
+            );
+
+            const availableSlots = Math.max(0, maxParallel - openPhasePrs.length);
+            if (availableSlots === 0) {
+              core.info(`No kickoff slots available (max_parallel=${maxParallel}, open_phase_prs=${openPhasePrs.length}).`);
+              return;
+            }
+
+            const candidates = milestoneIssues
+              .map(i => {
+                const milestone = milestoneFromLabels(i);
+                const deps = depsFromBody(i);
+                const blockedByOpenDep = deps.some(dep => {
+                  const depIssue = byMilestone.get(dep);
+                  return depIssue && String(depIssue.state || '').toLowerCase() !== 'closed';
+                });
+                return { issue: i, milestone, deps, blockedByOpenDep };
+              })
+              .filter(x => x.milestone && !x.blockedByOpenDep && !openMilestones.has(x.milestone))
+              .sort((a, b) => {
+                const na = Number((a.milestone.match(/\d+/) || [999])[0]);
+                const nb = Number((b.milestone.match(/\d+/) || [999])[0]);
+                return na - nb;
+              });
+
+            const toStart = candidates.slice(0, availableSlots);
+            if (!toStart.length) {
+              core.info('No dependency-ready milestone issues available to kickoff.');
+              return;
+            }
+
+            const baseSha = await getBaseRefSha();
+            const results = [];
+
+            for (const entry of toStart) {
+              const { issue, milestone } = entry;
+              const suffix = slugify(issue.title.replace(/^\[[^\]]+\]\s*/, ''));
+              const headRef = `phase/${milestone}-${suffix}`;
+
+              try {
+                const exists = await branchExists(headRef);
+                if (!exists && !dryRun) {
+                  await createBranch(headRef, baseSha);
+                }
+
+                let pr = await findOpenPrByHead(headRef);
+                if (!pr && !dryRun) {
+                  pr = await createDraftPrForIssue(issue, milestone, headRef, orchestratorIssue);
+                }
+
+                const prRef = pr ? `#${pr.number}` : '(dry-run)';
+                results.push(`started ${milestone} -> ${headRef} ${prRef}`);
+
+                if (!dryRun) {
+                  await addComment(issue.number, `Kickoff created draft PR ${pr.html_url} from branch \`${headRef}\`.`);
+                }
+              } catch (e) {
+                results.push(`failed ${milestone}: ${e.message || e}`);
+              }
+            }
+
+            if (orchestratorIssue && !dryRun) {
+              await addComment(
+                orchestratorIssue.number,
+                ['Kickoff run summary:', ...results.map(r => `- ${r}`)].join('\n'),
+              );
+            }
+
+            core.summary
+              .addHeading('Kickoff results')
+              .addList(results)
+              .write();

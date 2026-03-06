@@ -59,6 +59,21 @@ This plan is written to be **implementation-ready**, **testable**, and **auditab
 
 ---
 
+## Dependencies
+| Milestone | Depends On |
+|---|---|
+| M0 | |
+| M1 | M0 |
+| M2 | M0 |
+| M3 | M1, M2 |
+| M4 | M3 |
+| M5 | M4 |
+| M6 | M4 |
+| M7 | M5, M6 |
+| M8 | M7 |
+
+---
+
 ## Product behavior specification
 
 ### Modes
