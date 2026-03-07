@@ -273,16 +273,16 @@ jobs:
             // Lazy-load assignable assignees only when assignment is actually
             // attempted (skipped on dry_run and non-relevant issue events) to
             // avoid unnecessary API calls and early failures from rate limits.
-            let _assignableCache = null;
+            let assignableCache = null;
             async function getAssignableAssignees() {
-              if (_assignableCache) return _assignableCache;
+              if (assignableCache) return assignableCache;
               try {
-                _assignableCache = await listAssignableAssignees();
+                assignableCache = await listAssignableAssignees();
               } catch (e) {
                 core.warning(`Could not load assignable users: ${e.message || e}`);
-                _assignableCache = new Set();
+                assignableCache = new Set();
               }
-              return _assignableCache;
+              return assignableCache;
             }
 
             let orchestratorIssue = null;
