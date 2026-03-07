@@ -83,7 +83,7 @@ jobs:
               return issues.filter(i => !i.pull_request && hasMilestoneLabel(i));
             }
 
-            async function listMergedPhasePrs() {
+            async function listMergedImplementationPrs() {
               const prs = await github.paginate(github.rest.pulls.list, {
                 owner,
                 repo,
@@ -91,12 +91,15 @@ jobs:
                 base: 'plan-base',
                 per_page: 100,
               });
-              return prs.filter(pr => pr.merged_at && String(pr.head?.ref || '').startsWith('phase/'));
+              return prs.filter(pr => {
+                const headRef = String(pr.head?.ref || '');
+                return pr.merged_at && (headRef.startsWith('phase/') || headRef.startsWith('copilot/'));
+              });
             }
 
             async function reconcileMergedPhaseIssues() {
               let closedCount = 0;
-              const mergedPhasePrs = await listMergedPhasePrs();
+              const mergedPhasePrs = await listMergedImplementationPrs();
 
               for (const pr of mergedPhasePrs) {
                 const linked = parseLinkedIssueNumbers(`${pr.title || ''}\n${pr.body || ''}`);
@@ -129,7 +132,9 @@ jobs:
             // 1) If a phase PR merged into plan-base, close linked milestone issues.
             if (context.eventName === 'pull_request' || context.eventName === 'pull_request_target') {
               const pr = context.payload.pull_request;
-              if (pr?.merged && pr.base?.ref === 'plan-base' && String(pr.head?.ref || '').startsWith('phase/')) {
+              const headRef = String(pr?.head?.ref || '');
+              const isImplementationPr = headRef.startsWith('phase/') || headRef.startsWith('copilot/');
+              if (pr?.merged && pr.base?.ref === 'plan-base' && isImplementationPr) {
                 phaseAdvanceTriggered = true;
                 const linked = parseLinkedIssueNumbers(`${pr.title || ''}\n${pr.body || ''}`);
                 for (const n of linked) {
@@ -141,7 +146,7 @@ jobs:
                   }
                 }
               } else {
-                core.info('PR event is not a merged phase PR into plan-base; skipping close step (eventName=' + context.eventName + ').');
+                core.info('PR event is not a merged implementation PR into plan-base; skipping close step (eventName=' + context.eventName + ').');
               }
             } else if (context.eventName === 'workflow_dispatch' || context.eventName === 'schedule') {
               reconciledCloseCount = await reconcileMergedPhaseIssues();

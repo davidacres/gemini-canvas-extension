@@ -11,6 +11,7 @@ name: CI
       - main
       - plan-base
       - phase/**
+      - copilot/**
       - chore/**
 
 permissions:
