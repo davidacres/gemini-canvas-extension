@@ -216,23 +216,23 @@ jobs:
 
             async function ensureAssignedToPreferred(issue, preferredAssignee, allowedAssigneesSet, assignableAssigneesSet) {
               if (!issue?.number || !preferredAssignee) {
-                return { assigned: false, verified: false, preferredUnavailable: false };
+                return { assigned: false, verified: false, preferredUnavailable: false, reason: 'missing_input' };
               }
 
               const preferredLogin = String(preferredAssignee || '').toLowerCase();
               const current = (issue.assignees || []).map(a => String(a?.login || '').toLowerCase()).filter(Boolean);
               if (current.includes(preferredLogin)) {
-                return { assigned: true, verified: true, preferredUnavailable: false };
+                return { assigned: true, verified: true, preferredUnavailable: false, reason: 'already_assigned' };
               }
 
               const hasAllowedAssignee = current.some(login => allowedAssigneesSet.has(login));
               if (hasAllowedAssignee) {
-                return { assigned: false, verified: true, preferredUnavailable: false };
+                return { assigned: false, verified: true, preferredUnavailable: false, reason: 'other_allowed_assignee' };
               }
 
               if (!assignableAssigneesSet.has(preferredLogin)) {
                 core.warning(`Preferred assignee ${preferredAssignee} is not assignable via the repository issues API.`);
-                return { assigned: false, verified: false, preferredUnavailable: true };
+                return { assigned: false, verified: false, preferredUnavailable: true, reason: 'not_assignable' };
               }
 
               try {
@@ -249,14 +249,14 @@ jobs:
 
                 if (refreshedAssignees.includes(preferredLogin)) {
                   core.info(`Assigned issue #${issue.number} to ${preferredAssignee}.`);
-                  return { assigned: true, verified: true, preferredUnavailable: false };
+                  return { assigned: true, verified: true, preferredUnavailable: false, reason: 'assigned' };
                 }
 
                 core.warning(`GitHub accepted assignment for issue #${issue.number}, but ${preferredAssignee} is not present in the resulting issue assignees.`);
-                return { assigned: false, verified: false, preferredUnavailable: true };
+                return { assigned: false, verified: false, preferredUnavailable: true, reason: 'verification_failed' };
               } catch (e) {
                 core.warning(`Could not assign issue #${issue.number} to ${preferredAssignee}: ${e.message || e}`);
-                return { assigned: false, verified: false, preferredUnavailable: true };
+                return { assigned: false, verified: false, preferredUnavailable: true, reason: 'api_error' };
               }
             }
 
@@ -269,7 +269,21 @@ jobs:
             const allowedAssigneesList = parseCsvList(process.env.KICKOFF_ALLOWED_ASSIGNEES, ALLOWED_ASSIGNEES_DEFAULT);
             const allowedAssignees = parseCsvSet(process.env.KICKOFF_ALLOWED_ASSIGNEES, ALLOWED_ASSIGNEES_DEFAULT);
             const preferredAssignee = allowedAssigneesList[0] || ALLOWED_ASSIGNEES_DEFAULT;
-            const assignableAssignees = await listAssignableAssignees();
+
+            // Lazy-load assignable assignees only when assignment is actually
+            // attempted (skipped on dry_run and non-relevant issue events) to
+            // avoid unnecessary API calls and early failures from rate limits.
+            let assignableCache = null;
+            async function getAssignableAssignees() {
+              if (assignableCache) return assignableCache;
+              try {
+                assignableCache = await listAssignableAssignees();
+              } catch (e) {
+                core.warning(`Could not load assignable users: ${e.message || e}`);
+                assignableCache = new Set();
+              }
+              return assignableCache;
+            }
 
             let orchestratorIssue = null;
             let forcedIssueNumber = null;
@@ -293,7 +307,7 @@ jobs:
                 }
 
                 if (!dryRun) {
-                  await ensureAssignedToPreferred(issue, preferredAssignee, allowedAssignees, assignableAssignees);
+                  await ensureAssignedToPreferred(issue, preferredAssignee, allowedAssignees, await getAssignableAssignees());
                 }
                 orchestratorIssue = issue;
               } else if (isMilestone) {
@@ -356,7 +370,7 @@ jobs:
               }
 
               if (orchestratorIssue && !dryRun) {
-                await ensureAssignedToPreferred(orchestratorIssue, preferredAssignee, allowedAssignees, assignableAssignees);
+                await ensureAssignedToPreferred(orchestratorIssue, preferredAssignee, allowedAssignees, await getAssignableAssignees());
               }
             }
 
@@ -457,7 +471,7 @@ jobs:
                 let assignmentResult = { assigned: false, verified: false, preferredUnavailable: false };
 
                 if (!dryRun) {
-                  assignmentResult = await ensureAssignedToPreferred(issue, preferredAssignee, allowedAssignees, assignableAssignees);
+                  assignmentResult = await ensureAssignedToPreferred(issue, preferredAssignee, allowedAssignees, await getAssignableAssignees());
                   await removeLabelIfPresent(issue.number, 'state:ready');
                   await addLabels(issue.number, ['state:in-progress']);
                   await dispatchWorkflow(COPILOT_WORKER_WORKFLOW, BASE_BRANCH, {
@@ -471,12 +485,20 @@ jobs:
                 results.push(`queued ${milestone} via Copilot worker`);
 
                 if (!dryRun) {
+                  let assignmentNote = null;
+                  if (assignmentResult.preferredUnavailable) {
+                    if (assignmentResult.reason === 'not_assignable') {
+                      assignmentNote = `Preferred assignee \`${preferredAssignee}\` is not assignable via the repository issues API, so the workflow used a Copilot task dispatch instead of relying on issue assignment.`;
+                    } else if (assignmentResult.reason === 'verification_failed') {
+                      assignmentNote = `GitHub accepted the assignment of \`${preferredAssignee}\` but post-write verification did not confirm it; the issue was marked \`state:in-progress\` instead of recording a verified assignee.`;
+                    } else {
+                      assignmentNote = `The workflow could not verify or assign the preferred assignee \`${preferredAssignee}\` (${assignmentResult.reason}), so it marked this issue \`state:in-progress\` instead of recording a verified assignee.`;
+                    }
+                  }
                   const guidance = [
                     `Kickoff queued the Copilot phase worker for ${milestone}.`,
                     `Copilot should open an implementation PR into \`${BASE_BRANCH}\` with \`Closes #${issue.number}\` in the PR body.`,
-                    assignmentResult.preferredUnavailable
-                      ? `Preferred assignee \`${preferredAssignee}\` is not assignable via the repository issues API, so the workflow used a Copilot task dispatch instead of relying on issue assignment.`
-                      : null,
+                    assignmentNote,
                     orchestratorIssue ? `Related orchestration: #${orchestratorIssue.number}.` : null,
                   ].filter(Boolean).join(' ');
                   await addComment(issue.number, guidance);
