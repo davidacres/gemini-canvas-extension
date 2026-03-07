@@ -123,6 +123,8 @@ Recommended PR convention for phase branches:
     - milestone issue kickoff is gated by assignee allow-list (default: `copilot`)
       - configure repository variable `KICKOFF_ALLOWED_ASSIGNEES` as comma-separated GitHub logins
     - if the preferred assignee is not assignable via the repository issues API, the workflow still uses the Copilot worker path instead of logging a false assignment success
+    - assignment verification distinguishes three failure modes: "not assignable" (account not in the repo's assignee list), "verification failed" (API accepted the call but post-write check did not confirm), and "API error" (network/rate-limit/permission failure). Each produces a tailored comment.
+    - assignee lookups are lazy-loaded: the `listAssignees` API is only called when assignment is actually attempted (skipped on `dry_run` and non-relevant issue events)
     - if kickoff is skipped by assignee policy, the workflow comments the reason on the milestone issue
     - scheduled and push-based runs provide self-healing if an issue event is missed
 
@@ -149,7 +151,7 @@ Recommended PR convention for phase branches:
   - On scheduled or manual reconciliation runs:
     - scans merged implementation PRs into `plan-base`
     - closes any still-open linked milestone issues that should already be completed
-    - re-dispatches kickoff when milestones remain open
+    - dispatches kickoff only when reconciliation actually closed issue(s); plain schedule runs that find nothing new are no-ops because kickoff has its own schedule
   - Generic issue closure does not advance execution
   - When all milestone issues are closed:
     - dispatches `promote-plan-base.yml` to open/update promotion PR to `main`
@@ -196,3 +198,39 @@ This uses `PLAN_SYNC_TOKEN` in Actions. Local `gh` CLI tokens may not have admin
 - Not bypassed by automation:
   - mandatory human approvals from branch protection
   - required checks and policy gates
+
+## Loop safety
+
+The workflows use a `PLAN_SYNC_TOKEN` (PAT) so their actions can
+re-trigger other workflows.  The following design constraints prevent
+infinite loops:
+
+1. **Label cascade terminates naturally.**
+   `kickoff` adds `state:in-progress` → `board-automation` sets the
+   project status → `project-status-label-sync` writes the label back.
+   Because the label is already present the second time, GitHub emits no
+   new `labeled` event and the chain stops (typically 2–3 hops).
+
+2. **Kickoff ignores its own label side-effects.**
+   `kickoff` triggers on `issues.labeled` but only acts when the label
+   is `state:ready` / `ready` / `kickoff` / `ai-start`.  The
+   `state:in-progress` label it writes does not match, so the re-fired
+   event is a no-op.
+
+3. **Execution-controller schedule is additive, not circular.**
+   Scheduled reconciliation only dispatches kickoff when it actually
+   reconciled (closed) at least one milestone issue.  Plain "nothing
+   changed" schedule ticks exit early; kickoff's own schedule handles
+   periodic re-evaluation.
+
+4. **Copilot-phase-worker → kickoff.**
+   The worker marks the issue `state:in-progress`, which fires
+   `issues.labeled`.  Kickoff sees an `in-progress` label event (not
+   `ready`), so it skips.
+
+5. **plan-sync → kickoff.**
+   plan-sync creates/edits issues, but never adds `state:ready`,
+   `kickoff`, or `ai-start` labels, so kickoff ignores those events.
+
+6. **Concurrency groups** on every workflow prevent thundering-herd
+   effects from rapid-fire events.
