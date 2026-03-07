@@ -162,7 +162,8 @@ jobs:
               if (!pr?.number || !pr?.node_id) return pr;
               if (!pr.draft || pr.state !== 'open') return pr;
               if (pr.base?.ref !== 'plan-base') return pr;
-              if (!String(pr.head?.ref || '').startsWith('phase/')) return pr;
+              const headRef = String(pr.head?.ref || '');
+              if (!headRef.startsWith('phase/') && !headRef.startsWith('copilot/')) return pr;
 
               const files = await listChangedFiles(pr.number);
               if (!hasRealWorkChanges(files)) {

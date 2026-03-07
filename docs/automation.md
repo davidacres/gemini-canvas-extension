@@ -7,18 +7,19 @@ This repository uses GitHub Actions to keep planning, board state, and PR flow a
 2. `plan-sync.yml` creates or updates:
   - one milestone issue per phase (`M0`..`M8`)
   - one parent orchestration issue labeled `plan-orchestrator`
-3. Create a phase branch from `plan-base` (example: `phase/M3-design-mode`).
-4. Open a PR from phase branch into `plan-base`.
-5. Work starts when the milestone issue is moved to `Ready` or assigned.
+3. Move a milestone issue to `Ready` or assign it to an allowed kickoff assignee.
+4. `kickoff-phase-work.yml` checks dependencies and parallelism, then dispatches `copilot-phase-worker.yml`.
+5. `copilot-phase-worker.yml` creates a GitHub Copilot agent task, which should open an implementation PR into `plan-base`.
 6. Board status then updates automatically from issue/PR events.
 
 Moving the parent orchestrator issue to `In Progress` and assigning it is a coordination signal.
-It does not auto-generate implementation code by itself.
+It is enough to keep autonomous kickoff alive, but it does not directly create implementation code by itself.
 
 ## Branch strategy
 - `main`: stable integration branch
 - `plan-base`: gated branch for milestone completion merges
 - `phase/*`: implementation branches for each milestone/phase
+- `copilot/*`: GitHub-managed implementation branches opened by Copilot agent tasks
 
 Recommended PR convention for phase branches:
 - PR title includes milestone token (example: `[M3] Design mode`)
@@ -64,7 +65,7 @@ Recommended PR convention for phase branches:
 
 - `.github/workflows/pr-automation.yml`
   - PR labels/reviewers/auto-merge helper
-  - For `phase/* -> plan-base` PRs, auto-converts draft to ready-for-review when non-kickoff files are detected
+  - For `phase/* -> plan-base` and `copilot/* -> plan-base` PRs, auto-converts draft to ready-for-review when non-kickoff files are detected
   - Label behavior:
     - Draft PR -> `wip`
     - Ready PR -> `needs-review`
@@ -76,8 +77,9 @@ Recommended PR convention for phase branches:
     - Set repository variable `AUTO_REVIEWERS` to comma-separated GitHub usernames
 
 - `.github/workflows/phase-gate.yml`
-  - Enforces merge readiness only for PRs from `phase/*` into `plan-base`
+  - Enforces merge readiness for implementation PRs into `plan-base`
   - Gate checks:
+    - PR source branch matches `phase/*` or `copilot/*`
     - PR is not draft
     - milestone token present (`M0`..`M8`) in title/body/branch
     - corresponding milestone issue exists and is closed
@@ -88,11 +90,11 @@ Recommended PR convention for phase branches:
 
 - `.github/workflows/ci.yml`
   - Baseline CI for implementation branches and PRs
-  - Runs on `main`, `plan-base`, and working branches (`phase/*`, `chore/*`)
+  - Runs on `main`, `plan-base`, and working branches (`phase/*`, `copilot/*`, `chore/*`)
   - Executes `lint`, `typecheck`, `test`, `build` scripts when present
 
 - `.github/workflows/kickoff-phase-work.yml`
-  - Starts execution from an open orchestrator issue or directly from milestone issue assignment
+  - Starts execution from an open orchestrator issue or directly from milestone issue assignment / `Ready`
   - Triggers:
     - scheduled reconciliation every 15 minutes
     - push to automation or plan files on `main` / `plan-base`
@@ -101,38 +103,55 @@ Recommended PR convention for phase branches:
       - labeling a milestone with `state:ready` (or `ready`) requests kickoff
     - manual dispatch (`workflow_dispatch`)
   - Behavior:
-    - auto-assigns the open orchestrator issue to the preferred allowed assignee (default `copilot`)
+    - verifies whether the preferred assignee is assignable through the repository issues API before claiming assignment
+    - preserves an existing manual Copilot assignment on the orchestrator issue when present
     - reads open milestone issues and their dependency metadata
     - selects dependency-ready milestones only
-    - dependency completion is based on merged `phase/* -> plan-base` PRs, not manual issue closure
+    - dependency completion is based on merged implementation PRs into `plan-base` (`phase/*` or `copilot/*`), not manual issue closure
     - respects parallel cap (`max_parallel`, default 2)
-    - auto-assigns started milestone issues to preferred allowed assignee (first entry in `KICKOFF_ALLOWED_ASSIGNEES`, default `copilot`)
-    - creates `phase/Mx-*` branches from `plan-base`
-    - comments guidance on the milestone issue instead of opening kickoff-only PRs
+    - treats milestones already marked `state:in-progress`, `state:in-review`, or with open implementation PRs as active work
+    - attempts to assign started milestone issues to the preferred allowed assignee when GitHub reports that assignee as API-assignable
+    - dispatches `copilot-phase-worker.yml` for each dependency-ready milestone it starts
+    - temporarily moves the issue to `state:in-progress` before worker dispatch; if dispatch fails, it restores `state:ready`
+    - comments the queue result on the milestone issue and on the orchestrator summary
   - Notes:
     - an open orchestrator issue is enough for automatic kickoff and recovery; no manual `Ready` label is required
-    - orchestrator assignment is maintained automatically but does not itself trigger implementation work
+    - orchestrator assignment does not itself trigger implementation work
     - assignment to a milestone issue prioritizes that specific milestone
-    - marking a milestone issue `state:ready` can trigger kickoff and assignment to preferred assignee
+    - marking a milestone issue `state:ready` can trigger kickoff and Copilot worker dispatch
     - optional label `ai-start` on a milestone issue can request kickoff without reassignment
     - milestone issue kickoff is gated by assignee allow-list (default: `copilot`)
       - configure repository variable `KICKOFF_ALLOWED_ASSIGNEES` as comma-separated GitHub logins
+    - if the preferred assignee is not assignable via the repository issues API, the workflow still uses the Copilot worker path instead of logging a false assignment success
+    - assignment verification distinguishes three failure modes: "not assignable" (account not in the repo's assignee list), "verification failed" (API accepted the call but post-write check did not confirm), and "API error" (network/rate-limit/permission failure). Each produces a tailored comment.
+    - assignee lookups are lazy-loaded: the `listAssignees` API is only called when assignment is actually attempted (skipped on `dry_run` and non-relevant issue events)
     - if kickoff is skipped by assignee policy, the workflow comments the reason on the milestone issue
     - scheduled and push-based runs provide self-healing if an issue event is missed
 
+- `.github/workflows/copilot-phase-worker.yml`
+  - Creates the GitHub Copilot coding task for a milestone issue
+  - Trigger:
+    - internal `workflow_dispatch` from kickoff (and manual dispatch for recovery/testing)
+  - Behavior:
+    - validates that the issue is an open synced milestone issue
+    - refuses to queue duplicate work when an open implementation PR already exists
+    - builds a task prompt with milestone token, PR title rules, and `Closes #...` requirements
+    - runs `gh agent-task create --base plan-base`
+    - marks the issue `state:in-progress` only after the task is queued successfully
+    - restores `state:ready` and comments the failure reason when task creation cannot be queued
 - `.github/workflows/phase-automerge.yml`
-  - Enables GitHub auto-merge on `phase/* -> plan-base` PRs (squash)
+  - Enables GitHub auto-merge on implementation PRs into `plan-base` (squash)
   - PR merges automatically once required checks pass
 
 - `.github/workflows/execution-controller.yml`
   - Autonomous progression controller
-  - On merged `phase/* -> plan-base` PR:
+  - On merged implementation PR into `plan-base` (`phase/*` or `copilot/*`):
     - closes linked milestone issue(s) from PR body (`Closes #...`)
     - dispatches kickoff again for next dependency-ready phases
   - On scheduled or manual reconciliation runs:
-    - scans merged `phase/* -> plan-base` PRs
+    - scans merged implementation PRs into `plan-base`
     - closes any still-open linked milestone issues that should already be completed
-    - re-dispatches kickoff when milestones remain open
+    - dispatches kickoff only when reconciliation actually closed issue(s); plain schedule runs that find nothing new are no-ops because kickoff has its own schedule
   - Generic issue closure does not advance execution
   - When all milestone issues are closed:
     - dispatches `promote-plan-base.yml` to open/update promotion PR to `main`
@@ -152,7 +171,7 @@ Recommended PR convention for phase branches:
 
 Optional repository variables:
 - `KICKOFF_ALLOWED_ASSIGNEES`
-  - default behavior if unset: `copilot` is the preferred auto-assignee for orchestrator and started milestone issues
+  - default behavior if unset: `copilot` is the preferred assignee name for orchestration, but assignment is only recorded when GitHub exposes that login as assignable through the issues API
   - format: comma-separated GitHub logins (example: `copilot,github-copilot[bot],davidacres`)
 
 You can enforce these automatically by running:
@@ -165,13 +184,53 @@ This uses `PLAN_SYNC_TOKEN` in Actions. Local `gh` CLI tokens may not have admin
   - scopes:
     - `repo` (or `public_repo`)
     - `project`
+- `COPILOT_AGENT_TOKEN` (recommended for `gh agent-task create`)
+  - use a token type accepted by the GitHub CLI Copilot task preview feature
+  - if unset, the worker falls back to `PLAN_SYNC_TOKEN` and then `github.token`, but task creation may still fail if GitHub requires a different token type
 
 ## What is and is not fully automatable
 - Automated:
   - task generation from plan
+  - Copilot task dispatch from milestone `Ready` state
   - board status updates from issue/PR lifecycle
   - reviewer requests
   - enabling auto-merge when labeled and allowed
 - Not bypassed by automation:
   - mandatory human approvals from branch protection
   - required checks and policy gates
+
+## Loop safety
+
+The workflows use a `PLAN_SYNC_TOKEN` (PAT) so their actions can
+re-trigger other workflows.  The following design constraints prevent
+infinite loops:
+
+1. **Label cascade terminates naturally.**
+   `kickoff` adds `state:in-progress` → `board-automation` sets the
+   project status → `project-status-label-sync` writes the label back.
+   Because the label is already present the second time, GitHub emits no
+   new `labeled` event and the chain stops (typically 2–3 hops).
+
+2. **Kickoff ignores its own label side-effects.**
+   `kickoff` triggers on `issues.labeled` but only acts when the label
+   is `state:ready` / `ready` / `kickoff` / `ai-start`.  The
+   `state:in-progress` label it writes does not match, so the re-fired
+   event is a no-op.
+
+3. **Execution-controller schedule is additive, not circular.**
+   Scheduled reconciliation only dispatches kickoff when it actually
+   reconciled (closed) at least one milestone issue.  Plain "nothing
+   changed" schedule ticks exit early; kickoff's own schedule handles
+   periodic re-evaluation.
+
+4. **Copilot-phase-worker → kickoff.**
+   The worker marks the issue `state:in-progress`, which fires
+   `issues.labeled`.  Kickoff sees an `in-progress` label event (not
+   `ready`), so it skips.
+
+5. **plan-sync → kickoff.**
+   plan-sync creates/edits issues, but never adds `state:ready`,
+   `kickoff`, or `ai-start` labels, so kickoff ignores those events.
+
+6. **Concurrency groups** on every workflow prevent thundering-herd
+   effects from rapid-fire events.
