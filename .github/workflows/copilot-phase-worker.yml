@@ -1,0 +1,313 @@
+name: Copilot phase worker
+
+"on":
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Milestone issue number to execute"
+        required: true
+      milestone:
+        description: "Milestone token (for example M3)"
+        required: false
+        default: ""
+      base_branch:
+        description: "Base branch for the Copilot PR"
+        required: false
+        default: "plan-base"
+      dry_run:
+        description: "If true, validate only and skip agent task creation"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: copilot-phase-worker-${{ inputs.issue_number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    env:
+      ISSUE_NUMBER: ${{ inputs.issue_number }}
+      BASE_BRANCH: ${{ inputs.base_branch || 'plan-base' }}
+      DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      GH_TOKEN: ${{ secrets.COPILOT_AGENT_TOKEN || secrets.PLAN_SYNC_TOKEN || github.token }}
+    steps:
+      - name: Prepare Copilot task prompt
+        id: prep
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PLAN_SYNC_TOKEN || github.token }}
+          script: |
+            const fs = require('fs');
+            const os = require('os');
+            const path = require('path');
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issueNumber = Number.parseInt(process.env.ISSUE_NUMBER || '', 10);
+            const requestedMilestone = String('${{ inputs.milestone }}' || '').trim().toUpperCase();
+            const baseBranch = String(process.env.BASE_BRANCH || 'plan-base').trim() || 'plan-base';
+            const dryRun = /^(1|true|yes)$/i.test(String(process.env.DRY_RUN || 'false'));
+
+            function labelNames(issue) {
+              return (issue?.labels || [])
+                .map(label => (typeof label === 'string' ? label : label?.name))
+                .filter(Boolean);
+            }
+
+            function milestoneFromLabels(issue) {
+              const hit = labelNames(issue).find(name => /^milestone:M\d+$/i.test(name));
+              return hit ? hit.split(':')[1].toUpperCase() : null;
+            }
+
+            function hasLabel(issue, name) {
+              return labelNames(issue).some(label => label.toLowerCase() === String(name || '').toLowerCase());
+            }
+
+            function linksIssue(text, number) {
+              return new RegExp(`(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+#${number}\\b`, 'i').test(text || '');
+            }
+
+            async function listOpenImplementationPrs(base) {
+              const prs = await github.paginate(github.rest.pulls.list, {
+                owner,
+                repo,
+                state: 'open',
+                base,
+                per_page: 100,
+              });
+              return prs.filter(pr => {
+                const headRef = String(pr.head?.ref || '');
+                return headRef.startsWith('phase/') || headRef.startsWith('copilot/');
+              });
+            }
+
+            if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
+              core.setOutput('should_run', 'false');
+              core.setOutput('reason', 'Invalid issue number input.');
+              return;
+            }
+
+            const issueRes = await github.rest.issues.get({
+              owner,
+              repo,
+              issue_number: issueNumber,
+            });
+            const issue = issueRes.data;
+
+            if (issue.pull_request) {
+              core.setOutput('should_run', 'false');
+              core.setOutput('reason', `Issue #${issueNumber} is a pull request.`);
+              return;
+            }
+
+            if (String(issue.state || '').toLowerCase() !== 'open') {
+              core.setOutput('should_run', 'false');
+              core.setOutput('reason', `Issue #${issueNumber} is already closed.`);
+              return;
+            }
+
+            if (!hasLabel(issue, 'plan-sync')) {
+              core.setOutput('should_run', 'false');
+              core.setOutput('reason', `Issue #${issueNumber} is not a synced milestone issue.`);
+              return;
+            }
+
+            const milestone = requestedMilestone || milestoneFromLabels(issue);
+            if (!milestone) {
+              core.setOutput('should_run', 'false');
+              core.setOutput('reason', `Issue #${issueNumber} has no milestone label.`);
+              return;
+            }
+
+            const openImplementationPrs = await listOpenImplementationPrs(baseBranch);
+            const linkedOpenPr = openImplementationPrs.find(pr => {
+              const text = `${pr.title || ''}\n${pr.body || ''}`;
+              return linksIssue(text, issueNumber);
+            });
+            if (linkedOpenPr) {
+              core.setOutput('should_run', 'false');
+              core.setOutput('reason', `Open implementation PR already exists: #${linkedOpenPr.number}`);
+              core.setOutput('existing_pr_url', linkedOpenPr.html_url || '');
+              return;
+            }
+
+            const promptPath = path.join(process.env.RUNNER_TEMP || os.tmpdir(), `copilot-phase-${issueNumber}.md`);
+            const prompt = [
+              `You are implementing milestone ${milestone} for issue #${issue.number} in ${owner}/${repo}.`,
+              '',
+              'Constraints:',
+              `- Work from the current repository state and target a pull request into ${baseBranch}.`,
+              `- The pull request title must start with [${milestone}].`,
+              `- The pull request body must include Closes #${issue.number} on its own line.`,
+              '- Keep the change minimal and scoped only to this milestone issue.',
+              '- Read docs/automation.md and any repo instructions before editing.',
+              '- Run the relevant validation for the files you change before you stop.',
+              '- Do not merge the pull request yourself.',
+              '',
+              `Issue title: ${issue.title}`,
+              '',
+              'Issue body:',
+              issue.body || '(no body)',
+              '',
+              dryRun ? 'This is a dry run. Validate the plan mentally, but do not create changes.' : 'Create the implementation pull request when the change is ready.',
+            ].join('\n');
+            fs.writeFileSync(promptPath, prompt, 'utf8');
+
+            core.setOutput('should_run', 'true');
+            core.setOutput('reason', 'Validated milestone issue for Copilot execution.');
+            core.setOutput('issue_number', String(issue.number));
+            core.setOutput('milestone', milestone);
+            core.setOutput('base_branch', baseBranch);
+            core.setOutput('prompt_path', promptPath);
+
+      - name: Dry run notice
+        if: ${{ steps.prep.outputs.should_run == 'true' && env.DRY_RUN == 'true' }}
+        run: |
+          echo "Dry run only. Prompt file: ${{ steps.prep.outputs.prompt_path }}"
+
+      - name: Check Copilot task prerequisites
+        if: ${{ steps.prep.outputs.should_run == 'true' && env.DRY_RUN != 'true' }}
+        id: preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! gh agent-task create --help >/dev/null 2>&1; then
+            echo 'can_run=false' >> "$GITHUB_OUTPUT"
+            echo 'reason=gh agent-task is not available in this runner image.' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo 'can_run=false' >> "$GITHUB_OUTPUT"
+            echo 'reason=GH_TOKEN is not set. Configure COPILOT_AGENT_TOKEN or PLAN_SYNC_TOKEN.' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo 'can_run=true' >> "$GITHUB_OUTPUT"
+          echo 'reason=preflight passed' >> "$GITHUB_OUTPUT"
+
+      - name: Create Copilot agent task
+        if: ${{ steps.prep.outputs.should_run == 'true' && env.DRY_RUN != 'true' && steps.preflight.outputs.can_run == 'true' }}
+        id: create_task
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          output_file="$RUNNER_TEMP/copilot-agent-task-${ISSUE_NUMBER}.txt"
+          if gh agent-task create --repo "$GITHUB_REPOSITORY" --base "$BASE_BRANCH" -F "${{ steps.prep.outputs.prompt_path }}" | tee "$output_file"; then
+            task_created=true
+            failure_reason=''
+          else
+            task_created=false
+            failure_reason="gh agent-task create exited with status $?"
+          fi
+          {
+            echo "output_file=$output_file"
+            echo "task_created=$task_created"
+            echo "failure_reason=$failure_reason"
+            echo 'task_output<<EOF'
+            cat "$output_file"
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mark issue in progress
+        if: ${{ steps.prep.outputs.should_run == 'true' && env.DRY_RUN != 'true' && steps.create_task.outputs.task_created == 'true' }}
+        uses: actions/github-script@v7
+        env:
+          TASK_OUTPUT: ${{ steps.create_task.outputs.task_output }}
+        with:
+          github-token: ${{ secrets.PLAN_SYNC_TOKEN || github.token }}
+          script: |
+            const issueNumber = Number('${{ steps.prep.outputs.issue_number }}');
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const taskOutput = String(process.env.TASK_OUTPUT || '').trim();
+            const marker = '<!-- copilot-phase-worker -->';
+
+            const issueRes = await github.rest.issues.get({ owner, repo, issue_number: issueNumber });
+            const labels = (issueRes.data.labels || [])
+              .map(label => (typeof label === 'string' ? label : label?.name))
+              .filter(Boolean);
+            const next = [...new Set(labels.filter(name => name !== 'state:ready' && name !== 'ready').concat('state:in-progress'))];
+            await github.rest.issues.setLabels({
+              owner,
+              repo,
+              issue_number: issueNumber,
+              labels: next,
+            });
+
+            const body = [
+              marker,
+              `Queued Copilot coding agent for this milestone via workflow run ${context.runNumber}.`,
+              '',
+              taskOutput ? '<details><summary>Agent task output</summary>\n\n```text\n' + taskOutput + '\n```\n\n</details>' : null,
+            ].filter(Boolean).join('\n');
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: issueNumber,
+              body,
+            });
+
+      - name: Restore ready state when task creation is skipped or fails
+        if: ${{ steps.prep.outputs.should_run == 'true' && env.DRY_RUN != 'true' && (steps.preflight.outputs.can_run != 'true' || steps.create_task.outputs.task_created != 'true') }}
+        uses: actions/github-script@v7
+        env:
+          PREFLIGHT_REASON: ${{ steps.preflight.outputs.reason }}
+          CREATE_FAILURE_REASON: ${{ steps.create_task.outputs.failure_reason }}
+          TASK_OUTPUT: ${{ steps.create_task.outputs.task_output }}
+        with:
+          github-token: ${{ secrets.PLAN_SYNC_TOKEN || github.token }}
+          script: |
+            const issueNumber = Number('${{ steps.prep.outputs.issue_number }}');
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const preflightReason = String(process.env.PREFLIGHT_REASON || '').trim();
+            const createFailureReason = String(process.env.CREATE_FAILURE_REASON || '').trim();
+            const taskOutput = String(process.env.TASK_OUTPUT || '').trim();
+
+            const issueRes = await github.rest.issues.get({ owner, repo, issue_number: issueNumber });
+            const labels = (issueRes.data.labels || [])
+              .map(label => (typeof label === 'string' ? label : label?.name))
+              .filter(Boolean);
+            const next = [...new Set(labels.filter(name => name !== 'state:in-progress').concat('state:ready'))];
+
+            await github.rest.issues.setLabels({
+              owner,
+              repo,
+              issue_number: issueNumber,
+              labels: next,
+            });
+
+            const reason = createFailureReason || preflightReason || 'Copilot task creation did not complete.';
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: issueNumber,
+              body: [
+                'Copilot phase worker could not queue an agent task, so the issue was returned to `state:ready` for retry.',
+                '',
+                `Reason: ${reason}`,
+                taskOutput ? '<details><summary>Task output</summary>\n\n```text\n' + taskOutput + '\n```\n\n</details>' : null,
+              ].filter(Boolean).join('\n'),
+            });
+
+      - name: Fail workflow when task creation fails
+        if: ${{ steps.prep.outputs.should_run == 'true' && env.DRY_RUN != 'true' && (steps.preflight.outputs.can_run != 'true' || steps.create_task.outputs.task_created != 'true') }}
+        shell: bash
+        run: |
+          echo "Copilot agent task creation failed." >&2
+          exit 1
+
+      - name: Summarize skipped execution
+        if: ${{ steps.prep.outputs.should_run != 'true' }}
+        run: |
+          echo "Skipping Copilot phase worker: ${{ steps.prep.outputs.reason }}"
