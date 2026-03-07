@@ -21,6 +21,10 @@ name: Kickoff phase work
         description: "If true, report actions without creating branches/PRs"
         required: false
         default: "false"
+      bypass_orchestrator_check:
+        description: "If true, allow kickoff even when no open orchestrator issue exists (manual override only)"
+        required: false
+        default: "false"
   issues:
     types:
       - assigned
@@ -265,8 +269,10 @@ jobs:
             const action = context.payload.action;
             const inputMax = context.payload.inputs?.max_parallel;
             const inputDry = context.payload.inputs?.dry_run;
+            const inputBypassOrchestratorCheck = context.payload.inputs?.bypass_orchestrator_check;
             const maxParallel = parseIntSafe(inputMax, MAX_PARALLEL_DEFAULT);
             const dryRun = parseBool(inputDry, false);
+            const bypassOrchestratorCheck = parseBool(inputBypassOrchestratorCheck, false);
             const allowedAssigneesList = parseCsvList(process.env.KICKOFF_ALLOWED_ASSIGNEES, ALLOWED_ASSIGNEES_DEFAULT);
             const allowedAssignees = parseCsvSet(process.env.KICKOFF_ALLOWED_ASSIGNEES, ALLOWED_ASSIGNEES_DEFAULT);
             const preferredAssignee = allowedAssigneesList[0] || ALLOWED_ASSIGNEES_DEFAULT;
@@ -351,8 +357,8 @@ jobs:
               });
               orchestratorIssue = openOrchestrators.find(i => !i.pull_request) || null;
 
-              if (!orchestratorIssue && eventName !== 'workflow_dispatch') {
-                core.info(`No open orchestrator issue found for ${eventName}; skipping automatic kickoff.`);
+              if (!orchestratorIssue && !bypassOrchestratorCheck) {
+                core.info(`No open orchestrator issue found for ${eventName}; skipping kickoff. Use bypass_orchestrator_check=true to override for manual runs.`);
                 return;
               }
 
